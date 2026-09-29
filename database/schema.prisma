@@ -1,0 +1,626 @@
+// AuthenQ database schema
+// Autonomous Adversarial Privacy & Bias-Testing Infrastructure
+//
+// Multi-tenant: every tenant-owned row carries organizationId and is always
+// filtered by the organization scope of the authenticated principal.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ORG_ADMIN
+  ANALYST
+  VIEWER
+}
+
+enum DataSourceType {
+  POSTGRES
+  MYSQL
+  SNOWFLAKE
+  REST_API
+  CSV
+  WAREHOUSE
+  DEMO
+}
+
+enum ConnectionStatus {
+  CONNECTED
+  DISCONNECTED
+  ERROR
+  PENDING
+}
+
+enum DatasetStatus {
+  REGISTERED
+  SCANNED
+  PROTECTED
+  ARCHIVED
+}
+
+enum SensitivityLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SyntheticStatus {
+  PENDING
+  GENERATING
+  READY
+  FAILED
+}
+
+enum AdversarialStatus {
+  GENERATED
+  TESTED
+  DISMISSED
+}
+
+enum ModelType {
+  CLASSIFICATION
+  SCORING
+  RANKING
+  GENERATIVE
+  OTHER
+}
+
+enum ModelEnvironment {
+  DEVELOPMENT
+  STAGING
+  PRODUCTION
+  SANDBOX
+}
+
+enum ModelStatus {
+  REGISTERED
+  MONITORING
+  PAUSED
+  RETIRED
+}
+
+enum ModelProvider {
+  MOCK
+  REST
+  INTERNAL
+  SANDBOX
+}
+
+enum TestType {
+  PRIVACY
+  FAIRNESS
+  FULL_ASSESSMENT
+}
+
+enum TestRunStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum TestResult {
+  PASS
+  WARNING
+  FAIL
+  INCONCLUSIVE
+}
+
+enum Frequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum AlertSeverity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertType {
+  PRIVACY_THRESHOLD_EXCEEDED
+  FAIRNESS_THRESHOLD_EXCEEDED
+  MODEL_REGRESSION_DETECTED
+  SCHEMA_CHANGED
+  NEW_SENSITIVE_FIELD
+  TEST_FAILED
+  SCHEDULED_TEST_FAILED
+  MODEL_VERSION_CHANGED
+  DATASET_CHANGED
+}
+
+enum AlertStatus {
+  NEW
+  INVESTIGATING
+  RESOLVED
+  DISMISSED
+}
+
+enum ReportType {
+  PRIVACY_ASSESSMENT
+  FAIRNESS_ASSESSMENT
+  MODEL_RISK_ASSESSMENT
+  CONTINUOUS_MONITORING
+  EXECUTIVE_SUMMARY
+}
+
+enum ReportFormat {
+  PDF
+  JSON
+  CSV
+}
+
+enum IntegrationType {
+  GITHUB
+  GITLAB
+  MODEL_API
+  WEBHOOK
+}
+
+enum IntegrationStatus {
+  ACTIVE
+  INACTIVE
+  ERROR
+}
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  industry  String?
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users               User[]
+  dataSources         DataSource[]
+  datasets            Dataset[]
+  models              Model[]
+  testRuns            TestRun[]
+  monitoringSchedules MonitoringSchedule[]
+  alerts              Alert[]
+  reports             Report[]
+  integrations        Integration[]
+  auditLogs           AuditLog[]
+  apiKeys             ApiKey[]
+}
+
+model User {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  email          String   @unique
+  passwordHash   String
+  role           Role     @default(VIEWER)
+  lastLoginAt    DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  auditLogs         AuditLog[]
+  reports           Report[]
+  passwordResets    PasswordResetToken[]
+
+  @@index([organizationId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ApiKey {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  prefix         String
+  keyHash        String   @unique
+  lastUsedAt     DateTime?
+  revokedAt      DateTime?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model DataSource {
+  id               String           @id @default(uuid())
+  organizationId   String
+  name             String
+  type             DataSourceType
+  connectionStatus ConnectionStatus @default(PENDING)
+  configuration    Json             @default("{}")
+  lastCheckedAt    DateTime?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  datasets     Dataset[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+model Dataset {
+  id             String        @id @default(uuid())
+  organizationId String
+  dataSourceId   String?
+  name           String
+  version        String        @default("1.0")
+  recordCount    Int           @default(0)
+  schemaVersion  String        @default("1")
+  schemaJson     Json          @default("[]")
+  status         DatasetStatus @default(REGISTERED)
+  domain         String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dataSource        DataSource?        @relation(fields: [dataSourceId], references: [id], onDelete: SetNull)
+  sensitiveFields   SensitiveField[]
+  syntheticDatasets SyntheticDataset[]
+  testRuns          TestRun[]
+  records           DatasetRecord[]
+
+  @@unique([organizationId, name, version])
+  @@index([organizationId])
+}
+
+/// Source records for the prototype. Fictional demo data only — never real
+/// enterprise records; the API never returns raw rows outside of the owning org.
+model DatasetRecord {
+  id        String   @id @default(uuid())
+  datasetId String
+  payload   Json
+  createdAt DateTime @default(now())
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId])
+}
+
+model SensitiveField {
+  id               String           @id @default(uuid())
+  datasetId        String
+  fieldName        String
+  category         String
+  sensitivityLevel SensitivityLevel
+  detectionMethod  String
+  confidence       Float            @default(0)
+  sampleMasked     String?
+  createdAt        DateTime         @default(now())
+
+  dataset Dataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@unique([datasetId, fieldName])
+  @@index([datasetId])
+}
+
+model SyntheticDataset {
+  id                   String          @id @default(uuid())
+  datasetId            String
+  version              String          @default("1.0")
+  recordCount          Int             @default(0)
+  generationMethod     String
+  privacyConfiguration Json            @default("{}")
+  statisticalSimilarity Float          @default(0)
+  status               SyntheticStatus @default(PENDING)
+  createdAt            DateTime        @default(now())
+
+  dataset          Dataset           @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+  records          SyntheticRecord[]
+  adversarialCases AdversarialCase[]
+
+  @@index([datasetId])
+}
+
+model SyntheticRecord {
+  id                 String   @id @default(uuid())
+  syntheticDatasetId String
+  payload            Json
+  createdAt          DateTime @default(now())
+
+  syntheticDataset SyntheticDataset @relation(fields: [syntheticDatasetId], references: [id], onDelete: Cascade)
+
+  @@index([syntheticDatasetId])
+}
+
+model AdversarialCase {
+  id                 String            @id @default(uuid())
+  syntheticDatasetId String
+  scenarioType       String
+  riskScore          Float
+  reidentification   Boolean           @default(false)
+  metadata           Json              @default("{}")
+  status             AdversarialStatus @default(GENERATED)
+  createdAt          DateTime          @default(now())
+
+  syntheticDataset SyntheticDataset @relation(fields: [syntheticDatasetId], references: [id], onDelete: Cascade)
+
+  @@index([syntheticDatasetId])
+  @@index([scenarioType])
+}
+
+model Model {
+  id             String           @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  version        String           @default("1.0")
+  modelType      ModelType        @default(CLASSIFICATION)
+  provider       ModelProvider    @default(MOCK)
+  endpoint       String?
+  authConfig     Json             @default("{}")
+  owner          String?
+  environment    ModelEnvironment @default(SANDBOX)
+  testFrequency  Frequency        @default(WEEKLY)
+  status         ModelStatus      @default(REGISTERED)
+  demoBehavior   String?
+  isDemo         Boolean          @default(false)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  testRuns            TestRun[]
+  monitoringSchedules MonitoringSchedule[]
+  reports             Report[]
+  versions            ModelVersionHistory[]
+
+  @@unique([organizationId, name, version])
+  @@index([organizationId])
+}
+
+model ModelVersionHistory {
+  id        String   @id @default(uuid())
+  modelId   String
+  version   String
+  note      String?
+  createdAt DateTime @default(now())
+
+  model Model @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@index([modelId])
+}
+
+model TestRun {
+  id             String        @id @default(uuid())
+  organizationId String
+  reference      String        @unique
+  testType       TestType
+  modelId        String?
+  datasetId      String?
+  status         TestRunStatus @default(QUEUED)
+  progress       Int           @default(0)
+  stage          String?
+  stages         Json          @default("[]")
+  configuration  Json          @default("{}")
+  riskScore      Float?
+  result         TestResult?
+  summary        Json          @default("{}")
+  errorMessage   String?
+  triggeredBy    String        @default("MANUAL")
+  modelVersion   String?
+  datasetVersion String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime      @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  model        Model?        @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  dataset      Dataset?      @relation(fields: [datasetId], references: [id], onDelete: SetNull)
+  privacyTests PrivacyTest[]
+  fairnessTests FairnessTest[]
+  metrics      Metric[]
+  alerts       Alert[]
+  reports      Report[]
+
+  @@index([organizationId, createdAt])
+  @@index([modelId])
+  @@index([datasetId])
+}
+
+model PrivacyTest {
+  id                    String     @id @default(uuid())
+  testRunId             String
+  syntheticDatasetId    String?
+  recordsTested         Int
+  adversarialCases      Int        @default(0)
+  highRiskCases         Int        @default(0)
+  reidentificationCases Int        @default(0)
+  privacyScore          Float
+  threshold             Float
+  result                TestResult
+  breakdown             Json       @default("{}")
+  createdAt             DateTime   @default(now())
+
+  testRun TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+
+  @@index([testRunId])
+}
+
+model FairnessTest {
+  id                     String     @id @default(uuid())
+  testRunId              String
+  protectedAttribute     String
+  sampleSize             Int
+  baselineSelectionRate  Float
+  variantSelectionRate   Float
+  selectionRateDiff      Float
+  demographicParityDiff  Float
+  equalOpportunityDiff   Float
+  counterfactualFlipRate Float
+  threshold              Float
+  confidenceLow          Float      @default(0)
+  confidenceHigh         Float      @default(0)
+  result                 TestResult
+  metricsJson            Json       @default("{}")
+  createdAt              DateTime   @default(now())
+
+  testRun            TestRun             @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+  counterfactualCases CounterfactualCase[]
+
+  @@index([testRunId])
+}
+
+model CounterfactualCase {
+  id                    String   @id @default(uuid())
+  fairnessTestId        String
+  originalProfile       Json
+  counterfactualProfile Json
+  originalOutcome       String
+  counterfactualOutcome String
+  originalScore         Float    @default(0)
+  counterfactualScore   Float    @default(0)
+  outcomeChanged        Boolean  @default(false)
+  createdAt             DateTime @default(now())
+
+  fairnessTest FairnessTest @relation(fields: [fairnessTestId], references: [id], onDelete: Cascade)
+
+  @@index([fairnessTestId])
+  @@index([fairnessTestId, outcomeChanged])
+}
+
+model Metric {
+  id          String   @id @default(uuid())
+  testRunId   String
+  metricName  String
+  metricValue Float
+  threshold   Float?
+  unit        String   @default("ratio")
+  breached    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  testRun TestRun @relation(fields: [testRunId], references: [id], onDelete: Cascade)
+
+  @@index([testRunId])
+  @@index([metricName])
+}
+
+model MonitoringSchedule {
+  id             String    @id @default(uuid())
+  organizationId String
+  modelId        String?
+  datasetId      String?
+  name           String
+  testType       TestType  @default(FULL_ASSESSMENT)
+  frequency      Frequency @default(WEEKLY)
+  intervalHours  Int?
+  enabled        Boolean   @default(true)
+  configuration  Json      @default("{}")
+  nextRun        DateTime?
+  lastRun        DateTime?
+  lastResult     TestResult?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  model        Model?       @relation(fields: [modelId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+}
+
+model Alert {
+  id             String        @id @default(uuid())
+  organizationId String
+  severity       AlertSeverity
+  alertType      AlertType
+  title          String
+  description    String
+  testRunId      String?
+  metricName     String?
+  currentValue   Float?
+  threshold      Float?
+  recommendedAction String?
+  status         AlertStatus   @default(NEW)
+  resolvedAt     DateTime?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  testRun      TestRun?     @relation(fields: [testRunId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([testRunId])
+}
+
+model Report {
+  id             String       @id @default(uuid())
+  organizationId String
+  reportType     ReportType
+  format         ReportFormat @default(PDF)
+  title          String
+  modelId        String?
+  testRunId      String?
+  rangeStart     DateTime?
+  rangeEnd       DateTime?
+  generatedById  String?
+  fileLocation   String?
+  fileSize       Int          @default(0)
+  payload        Json         @default("{}")
+  createdAt      DateTime     @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  model        Model?       @relation(fields: [modelId], references: [id], onDelete: SetNull)
+  testRun      TestRun?     @relation(fields: [testRunId], references: [id], onDelete: SetNull)
+  generatedBy  User?        @relation(fields: [generatedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}
+
+model Integration {
+  id             String            @id @default(uuid())
+  organizationId String
+  integrationType IntegrationType
+  name           String
+  configuration  Json              @default("{}")
+  status         IntegrationStatus @default(INACTIVE)
+  repository     String?
+  branch         String?
+  lastCommit     String?
+  lastEventAt    DateTime?
+  lastTestRunId  String?
+  lastResult     TestResult?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String?
+  action         String
+  resourceType   String
+  resourceId     String?
+  metadata       Json     @default("{}")
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+}
