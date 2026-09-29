@@ -136,10 +136,26 @@ describe('tenant assessment workflow', () => {
     expect(detail.status).toBe(200);
     expect(detail.body.status).toBe('COMPLETED');
     expect(detail.body.privacyTests).toHaveLength(1);
+    expect(detail.body.privacyTests[0].breakdown.statisticalSimilarity).toBeGreaterThanOrEqual(0);
     expect(detail.body.fairnessTests).toHaveLength(1);
+    const fairness = detail.body.fairnessTests[0];
+    expect(fairness.confidenceLow).toBeLessThanOrEqual(fairness.counterfactualFlipRate);
+    expect(fairness.confidenceHigh).toBeGreaterThanOrEqual(fairness.counterfactualFlipRate);
     expect(detail.body.fairnessTests[0].counterfactualCases[0].originalProfile).not.toHaveProperty('email');
     expect(detail.body.alerts.length).toBeGreaterThan(0);
     expect(detail.body.reports).toHaveLength(1);
+
+    const activity = await request(app)
+      .get('/api/dashboard/activity')
+      .set('Authorization', `Bearer ${token}`);
+    expect(activity.status).toBe(200);
+    expect(activity.body.alerts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        metricName: expect.any(String),
+        currentValue: expect.any(Number),
+        threshold: expect.any(Number),
+      }),
+    ]));
 
     const evidence = await request(app)
       .get(`/api/reports/${detail.body.reports[0].id}/download`)

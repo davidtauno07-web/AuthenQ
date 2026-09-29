@@ -295,8 +295,8 @@ export const OverviewPage = () => {
                     <p className="truncate text-sm font-medium text-ink-900">{alert.title}</p>
                     <p className="text-xs text-ink-500">
                       {alert.metricName ? `${alert.metricName} ` : ''}
-                      {alert.currentValue !== null && `= ${formatRatio(alert.currentValue)} `}
-                      {alert.threshold !== null && `(threshold ${formatRatio(alert.threshold)})`}
+                      {alert.currentValue != null && `= ${formatRatio(alert.currentValue)} `}
+                      {alert.threshold != null && `(threshold ${formatRatio(alert.threshold)})`}
                     </p>
                   </div>
                 </li>

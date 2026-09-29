@@ -200,7 +200,6 @@ export interface PrivacyTest {
   reidentificationCases: number;
   highRiskCases: number;
   kAnonymity: number;
-  statisticalSimilarity: number;
   privacyScore: number;
   threshold: number;
   result: TestResult;

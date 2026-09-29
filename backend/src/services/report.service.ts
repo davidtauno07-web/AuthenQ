@@ -7,6 +7,7 @@ import { prisma } from '../db/prisma.js';
 import { env } from '../config/env.js';
 import { badRequest, notFound } from '../utils/errors.js';
 import { getOrgSettings } from './settings.service.js';
+import { flipIntervalFromSummary } from '../engines/fairness/metrics.js';
 
 export interface GenerateReportInput {
   organizationId: string;
@@ -116,26 +117,29 @@ export const generateReport = async (input: GenerateReportInput) => {
         result: test.result,
         breakdown: test.breakdown,
       })),
-      fairnessTests: run.fairnessTests.map((test) => ({
-        protectedAttribute: test.protectedAttribute,
-        sampleSize: test.sampleSize,
-        baselineSelectionRate: test.baselineSelectionRate,
-        variantSelectionRate: test.variantSelectionRate,
-        selectionRateDifference: test.selectionRateDiff,
-        demographicParityDifference: test.demographicParityDiff,
-        equalOpportunityDifference: test.equalOpportunityDiff,
-        counterfactualFlipRate: test.counterfactualFlipRate,
-        threshold: test.threshold,
-        confidenceInterval: [test.confidenceLow, test.confidenceHigh],
-        result: test.result,
-        evidence: test.counterfactualCases.map((c) => ({
-          originalProfile: c.originalProfile,
-          counterfactualProfile: c.counterfactualProfile,
-          originalOutcome: c.originalOutcome,
-          counterfactualOutcome: c.counterfactualOutcome,
-          outcomeChanged: c.outcomeChanged,
-        })),
-      })),
+      fairnessTests: run.fairnessTests.map((test) => {
+        const interval = flipIntervalFromSummary(test.metricsJson);
+        return {
+          protectedAttribute: test.protectedAttribute,
+          sampleSize: test.sampleSize,
+          baselineSelectionRate: test.baselineSelectionRate,
+          variantSelectionRate: test.variantSelectionRate,
+          selectionRateDifference: test.selectionRateDiff,
+          demographicParityDifference: test.demographicParityDiff,
+          equalOpportunityDifference: test.equalOpportunityDiff,
+          counterfactualFlipRate: test.counterfactualFlipRate,
+          threshold: test.threshold,
+          confidenceInterval: [interval?.low ?? test.confidenceLow, interval?.high ?? test.confidenceHigh],
+          result: test.result,
+          evidence: test.counterfactualCases.map((c) => ({
+            originalProfile: c.originalProfile,
+            counterfactualProfile: c.counterfactualProfile,
+            originalOutcome: c.originalOutcome,
+            counterfactualOutcome: c.counterfactualOutcome,
+            outcomeChanged: c.outcomeChanged,
+          })),
+        };
+      }),
       alerts: run.alerts.map((alert) => ({
         severity: alert.severity,
         alertType: alert.alertType,

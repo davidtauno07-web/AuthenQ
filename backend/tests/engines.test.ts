@@ -74,6 +74,24 @@ describe('privacy and fairness engines', () => {
     expect(metrics.demographicParityDifference).toBe(1);
     expect(metrics.equalOpportunityDifference).toBe(1);
     expect(metrics.counterfactualFlipRate).toBe(1);
+    expect(metrics.flipConfidenceLow).toBeLessThanOrEqual(metrics.counterfactualFlipRate);
+    expect(metrics.flipConfidenceHigh).toBeGreaterThanOrEqual(metrics.counterfactualFlipRate);
     expect(metrics.sampleAdequacy).toBe('INSUFFICIENT');
+  });
+
+  it('bounds flip-rate uncertainty around changed pairs rather than group selection', () => {
+    const metrics = computeFairnessMetrics({
+      groups: [
+        { group: 'male', observations: Array.from({ length: 20 }, () => ({ positive: true })) },
+        { group: 'female', observations: Array.from({ length: 20 }, () => ({ positive: false })) },
+      ],
+      baselineGroup: 'male',
+      flippedCases: 2,
+      totalPairs: 20,
+    });
+    expect(metrics.counterfactualFlipRate).toBe(0.1);
+    expect(metrics.comparison.confidenceHigh).toBeLessThan(0.2);
+    expect(metrics.flipConfidenceLow).toBeLessThan(0.1);
+    expect(metrics.flipConfidenceHigh).toBeGreaterThan(0.1);
   });
 });

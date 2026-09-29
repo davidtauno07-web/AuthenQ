@@ -81,7 +81,7 @@ export const TestRunDetailPage = () => {
             <Metric label="Re-identification cases" value={formatNumber(test.reidentificationCases)} />
             <Metric label="High-risk cases" value={formatNumber(test.highRiskCases)} />
             <Metric label="Adversarial cases" value={formatNumber(test.adversarialCases)} />
-            <Metric label="Statistical similarity" value={formatPercent(test.statisticalSimilarity)} />
+            <Metric label="Statistical similarity" value={formatPercent(typeof test.breakdown.statisticalSimilarity === 'number' ? test.breakdown.statisticalSimilarity : null)} />
           </div>
           <pre className="mt-4 overflow-x-auto rounded bg-ink-50 p-3 text-xs">{JSON.stringify(test.breakdown, null, 2)}</pre>
         </Card>

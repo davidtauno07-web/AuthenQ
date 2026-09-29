@@ -22,6 +22,7 @@ import {
   runFairnessTest,
   type FairnessRunOutput,
 } from '../engines/fairness/fairnessEngine.js';
+import { flipIntervalFromSummary } from '../engines/fairness/metrics.js';
 import type { ProtectedAttributeConfig } from '../engines/fairness/counterfactual.js';
 import { getOrgSettings } from './settings.service.js';
 import {
@@ -560,8 +561,8 @@ const runFairnessPhase = async (input: FairnessPhaseInput) => {
         equalOpportunityDiff: output.metrics.equalOpportunityDifference,
         counterfactualFlipRate: output.metrics.counterfactualFlipRate,
         threshold: input.settings.thresholds.counterfactualFlipRate,
-        confidenceLow: output.metrics.comparison.confidenceLow,
-        confidenceHigh: output.metrics.comparison.confidenceHigh,
+        confidenceLow: output.metrics.flipConfidenceLow,
+        confidenceHigh: output.metrics.flipConfidenceHigh,
         result: output.result,
         metricsJson: {
           ...output.metrics,
@@ -865,7 +866,17 @@ export const getTestRun = async (organizationId: string, testRunId: string) => {
     },
   });
   if (!run) throw notFound('Test run not found');
-  return run;
+  return {
+    ...run,
+    fairnessTests: run.fairnessTests.map((test) => {
+      const interval = flipIntervalFromSummary(test.metricsJson);
+      return {
+        ...test,
+        confidenceLow: interval?.low ?? test.confidenceLow,
+        confidenceHigh: interval?.high ?? test.confidenceHigh,
+      };
+    }),
+  };
 };
 
 export const cancelTestRun = async (organizationId: string, testRunId: string) => {

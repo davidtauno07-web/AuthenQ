@@ -33,12 +33,32 @@ export interface FairnessMetrics {
   disparateImpactRatio: number;
   equalOpportunityDifference: number;
   counterfactualFlipRate: number;
+  flipConfidenceLow: number;
+  flipConfidenceHigh: number;
   flippedCases: number;
   totalPairs: number;
   zStatistic: number;
   /** Small samples must not be presented as definitive. */
   sampleAdequacy: 'ADEQUATE' | 'LIMITED' | 'INSUFFICIENT';
 }
+
+export const flipRateInterval = (flippedCases: number, totalPairs: number) => {
+  const interval = wilsonInterval(flippedCases, totalPairs);
+  return { low: round(interval.low, 4), high: round(interval.high, 4) };
+};
+
+export const flipIntervalFromSummary = (summary: unknown) => {
+  if (!summary || typeof summary !== 'object' || !('flippedCases' in summary) || !('totalPairs' in summary)) {
+    return null;
+  }
+  const { flippedCases, totalPairs } = summary;
+  if (
+    typeof flippedCases !== 'number' || !Number.isInteger(flippedCases) ||
+    typeof totalPairs !== 'number' || !Number.isInteger(totalPairs) ||
+    totalPairs < 0 || flippedCases < 0 || flippedCases > totalPairs
+  ) return null;
+  return flipRateInterval(flippedCases, totalPairs);
+};
 
 export const computeGroupMetrics = ({ group, observations }: GroupOutcomes): GroupMetrics => {
   const total = observations.length;
@@ -105,6 +125,7 @@ export const computeFairnessMetrics = (input: FairnessMetricsInput): FairnessMet
 
   const counterfactualFlipRate =
     input.totalPairs === 0 ? 0 : round(input.flippedCases / input.totalPairs, 4);
+  const flipInterval = flipRateInterval(input.flippedCases, input.totalPairs);
 
   const smallestSample = Math.min(...groups.map((g) => g.sampleSize));
 
@@ -117,6 +138,8 @@ export const computeFairnessMetrics = (input: FairnessMetricsInput): FairnessMet
     disparateImpactRatio,
     equalOpportunityDifference,
     counterfactualFlipRate,
+    flipConfidenceLow: flipInterval.low,
+    flipConfidenceHigh: flipInterval.high,
     flippedCases: input.flippedCases,
     totalPairs: input.totalPairs,
     zStatistic: round(
