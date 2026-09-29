@@ -312,6 +312,7 @@ const writePdf = (filePath: string, title: string, payload: ReportPayload): Prom
         fairnessTests: {
           protectedAttribute: string;
           counterfactualFlipRate: number;
+          confidenceInterval: [number, number];
           threshold: number;
           demographicParityDifference: number;
           sampleSize: number;
@@ -328,7 +329,7 @@ const writePdf = (filePath: string, title: string, payload: ReportPayload): Prom
     doc.moveDown(1.5);
 
     doc.fillColor('#000000').font('Helvetica-Bold').fontSize(16).text(data.reportTypeLabel);
-    doc.font('Helvetica').fontSize(10).fillColor('#333333').text(title);
+    doc.font('Helvetica').fontSize(10).fillColor('#333333').text(pdfSafeText(title));
     doc.moveDown(0.8);
 
     line(doc);
@@ -367,7 +368,7 @@ const writePdf = (filePath: string, title: string, payload: ReportPayload): Prom
       for (const test of run.fairnessTests) {
         paragraph(
           doc,
-          `Fairness Sword — protected attribute "${test.protectedAttribute}", sample ${test.sampleSize}, counterfactual flip rate ${(test.counterfactualFlipRate * 100).toFixed(2)}% against threshold ${(test.threshold * 100).toFixed(2)}%, demographic parity difference ${(test.demographicParityDifference * 100).toFixed(2)} pp → ${test.result}.`,
+          `Fairness Sword — protected attribute "${test.protectedAttribute}", sample ${test.sampleSize}, counterfactual flip rate ${(test.counterfactualFlipRate * 100).toFixed(2)}% (95% CI ${(test.confidenceInterval[0] * 100).toFixed(1)}–${(test.confidenceInterval[1] * 100).toFixed(1)}%) against threshold ${(test.threshold * 100).toFixed(2)}%, demographic parity difference ${(test.demographicParityDifference * 100).toFixed(2)} pp → ${test.result}.`,
         );
       }
       if (run.metrics.length > 0) {
@@ -392,9 +393,12 @@ const writePdf = (filePath: string, title: string, payload: ReportPayload): Prom
 
 type Doc = InstanceType<typeof PDFDocument>;
 
+const pdfSafeText = (text: string): string =>
+  text.replace(/ *→ */g, ' -> ').replace(/ *[—–] */g, ' - ');
+
 const heading = (doc: Doc, text: string): void => {
   doc.moveDown(0.9);
-  doc.font('Helvetica-Bold').fontSize(12).fillColor('#000000').text(text.toUpperCase(), {
+  doc.font('Helvetica-Bold').fontSize(12).fillColor('#000000').text(pdfSafeText(text.toUpperCase()), {
     characterSpacing: 1,
   });
   doc.moveDown(0.3);
@@ -402,11 +406,11 @@ const heading = (doc: Doc, text: string): void => {
 
 const keyValue = (doc: Doc, key: string, value: string): void => {
   doc.font('Helvetica').fontSize(9).fillColor('#555555').text(`${key}`, { continued: true });
-  doc.fillColor('#000000').text(`   ${value}`);
+  doc.fillColor('#000000').text(`   ${pdfSafeText(value)}`);
 };
 
 const paragraph = (doc: Doc, text: string): void => {
-  doc.font('Helvetica').fontSize(9.5).fillColor('#111111').text(text, { align: 'left' });
+  doc.font('Helvetica').fontSize(9.5).fillColor('#111111').text(pdfSafeText(text), { align: 'left' });
   doc.moveDown(0.4);
 };
 
