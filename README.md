@@ -4,7 +4,7 @@ Autonomous adversarial privacy and fairness testing around existing AI models an
 
 ## Run locally
 
-Requirements: Node.js 20+, npm, Docker Compose (or PostgreSQL with a matching connection string). Run commands from the repository root.
+Requirements: Node.js 20.19+ (or 22.12+), npm, Docker Compose (or PostgreSQL with a matching connection string). Run commands from the repository root.
 
 ```sh
 cp .env.example .env
