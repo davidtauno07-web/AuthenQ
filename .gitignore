@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+coverage/
+.env
+.env.local
+*.log
+.DS_Store
+storage/reports/*
+!storage/reports/.gitkeep
+backend/storage/
+*.tsbuildinfo
+frontend/vite.config.js
+frontend/dist/
+backend/dist/

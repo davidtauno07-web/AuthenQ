@@ -1,0 +1,33 @@
+{
+  "name": "authenq",
+  "private": true,
+  "version": "0.1.0",
+  "description": "AuthenQ — Autonomous Adversarial Privacy & Bias-Testing Infrastructure",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c gray,white \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace backend",
+    "dev:web": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace backend && npm run build --workspace frontend",
+    "lint": "npm run lint --workspace backend && npm run lint --workspace frontend",
+    "typecheck": "npm run typecheck --workspace backend && npm run typecheck --workspace frontend",
+    "test": "npm run test --workspace backend && npm run test --workspace frontend",
+    "db:generate": "prisma generate --schema database/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema database/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema database/schema.prisma",
+    "db:status": "prisma migrate status --schema database/schema.prisma",
+    "db:setup": "npm run db:deploy && npm run db:generate",
+    "db:seed": "npm run seed --workspace backend",
+    "db:reset": "prisma migrate reset --schema database/schema.prisma --force"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "prisma": "^6.2.1"
+  }
+}
