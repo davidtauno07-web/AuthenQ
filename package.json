@@ -1,0 +1,38 @@
+{
+  "name": "authenq",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AuthenQ — The Integrated Data Protection & AI Readiness Suite. From raw data to AI-ready data, safely.",
+  "workspaces": [
+    "apps/api",
+    "apps/web"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,worker,web -c gray,white,black \"npm:dev:api\" \"npm:dev:worker\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace apps/api",
+    "dev:worker": "npm run dev:worker --workspace apps/api",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/api && npm run build --workspace apps/web",
+    "start": "npm run start --workspace apps/api",
+    "start:worker": "npm run start:worker --workspace apps/api",
+    "lint": "npm run lint --workspace apps/api && npm run lint --workspace apps/web",
+    "typecheck": "npm run typecheck --workspace apps/api && npm run typecheck --workspace apps/web",
+    "test": "npm run test --workspace apps/api && npm run test --workspace apps/web",
+    "test:unit": "npm run test:unit --workspace apps/api && npm run test --workspace apps/web",
+    "test:e2e": "npm run test:e2e --workspace apps/api",
+    "db:setup": "npm run db:deploy --workspace apps/api && npm run db:generate --workspace apps/api",
+    "db:migrate": "npm run db:migrate --workspace apps/api",
+    "db:deploy": "npm run db:deploy --workspace apps/api",
+    "db:generate": "npm run db:generate --workspace apps/api",
+    "db:seed": "npm run db:seed --workspace apps/api",
+    "db:status": "npm run db:status --workspace apps/api",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

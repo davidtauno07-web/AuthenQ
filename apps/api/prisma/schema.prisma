@@ -1,0 +1,1225 @@
+// AuthenQ — PostgreSQL schema.
+// Every tenant-owned record carries `orgId`; services always filter by it.
+// Real source data lives only in `source_rows`. Everything downstream of Twin
+// (synthetic rows, tasks, labels, exports) references synthetic data only.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────── Identity & tenancy ───────────────────────────────
+
+model Organization {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String    @unique
+  plan      String    @default("TEAM")
+  region    String    @default("default")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  members     OrganizationMember[]
+  roles       Role[]
+  dataSources DataSource[]
+  projects    LabelProject[]
+
+  @@map("organizations")
+}
+
+model User {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String    @unique
+  name             String
+  passwordHash     String?
+  emailVerifiedAt  DateTime?
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  lastLoginAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  memberships OrganizationMember[]
+  sessions    Session[]
+  authTokens  AuthToken[]
+  mfaFactors  MfaFactor[]
+
+  @@map("users")
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String?  @db.Uuid
+  key         String
+  name        String
+  description String
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  org         Organization?        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  permissions RolePermission[]
+  members     OrganizationMember[]
+
+  @@unique([orgId, key])
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid()) @db.Uuid
+  key         String           @unique
+  description String
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String     @db.Uuid
+  permissionId String     @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model OrganizationMember {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  userId    String   @db.Uuid
+  roleId    String   @db.Uuid
+  status    String   @default("ACTIVE")
+  createdAt DateTime @default(now())
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role         @relation(fields: [roleId], references: [id])
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model Team {
+  id        String       @id @default(uuid()) @db.Uuid
+  orgId     String       @db.Uuid
+  name      String
+  createdAt DateTime     @default(now())
+  members   TeamMember[]
+
+  @@unique([orgId, name])
+  @@map("teams")
+}
+
+model TeamMember {
+  teamId String @db.Uuid
+  userId String @db.Uuid
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@map("team_members")
+}
+
+model Session {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  orgId         String    @db.Uuid
+  tokenHash     String    @unique
+  prevTokenHash String?   @unique
+  csrfToken     String
+  rotatedAt     DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  ip            String?
+  userAgent     String?
+  mfaVerified   Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  lastSeenAt    DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@map("sessions")
+}
+
+model AuthToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  type      String // EMAIL_VERIFY | PASSWORD_RESET | INVITE
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@map("auth_tokens")
+}
+
+model LoginEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @db.Uuid
+  email     String
+  success   Boolean
+  reason    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+  @@map("login_events")
+}
+
+model SecurityEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String?  @db.Uuid
+  userId    String?  @db.Uuid
+  type      String
+  severity  String   @default("INFO")
+  details   Json     @default("{}")
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@map("security_events")
+}
+
+model MfaFactor {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  type       String    @default("TOTP")
+  secretEnc  String
+  verifiedAt DateTime?
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("mfa_factors")
+}
+
+model SsoConnection {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  protocol  String // OIDC | SAML
+  provider  String // ENTRA_ID | OKTA | GOOGLE_WORKSPACE | CUSTOM
+  domain    String
+  config    Json     @default("{}")
+  status    String   @default("DRAFT")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, domain])
+  @@map("sso_connections")
+}
+
+model ServiceAccount {
+  id         String    @id @default(uuid()) @db.Uuid
+  orgId      String    @db.Uuid
+  name       String
+  roleKey    String
+  createdAt  DateTime  @default(now())
+  disabledAt DateTime?
+  apiKeys    ApiKey[]
+
+  @@unique([orgId, name])
+  @@map("service_accounts")
+}
+
+model ApiKey {
+  id               String          @id @default(uuid()) @db.Uuid
+  orgId            String          @db.Uuid
+  serviceAccountId String?         @db.Uuid
+  name             String
+  prefix           String
+  keyHash          String          @unique
+  scopes           String[]
+  lastUsedAt       DateTime?
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+  createdById      String?         @db.Uuid
+  createdAt        DateTime        @default(now())
+  serviceAccount   ServiceAccount? @relation(fields: [serviceAccountId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────── Platform infrastructure ───────────────────────────────
+
+model Setting {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, key])
+  @@map("settings")
+}
+
+model FeatureFlag {
+  key         String            @id
+  enabled     Boolean           @default(false)
+  stage       String            @default("BETA") // GA | BETA | EXPERIMENTAL | ENTERPRISE
+  description String
+  overrides   OrgFeatureFlag[]
+
+  @@map("feature_flags")
+}
+
+model OrgFeatureFlag {
+  orgId   String      @db.Uuid
+  key     String
+  enabled Boolean
+  flag    FeatureFlag @relation(fields: [key], references: [key], onDelete: Cascade)
+
+  @@id([orgId, key])
+  @@map("org_feature_flags")
+}
+
+model UsageEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  orgId        String   @db.Uuid
+  metric       String
+  quantity     Float
+  resourceType String?
+  resourceId   String?
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, metric, createdAt])
+  @@map("usage_events")
+}
+
+model UsageLimit {
+  id     String @id @default(uuid()) @db.Uuid
+  orgId  String @db.Uuid
+  metric String
+  limit  Float
+  period String @default("MONTH")
+
+  @@unique([orgId, metric])
+  @@map("usage_limits")
+}
+
+model BillingAccount {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @unique @db.Uuid
+  plan      String   @default("TEAM")
+  status    String   @default("BILLING_DISABLED")
+  createdAt DateTime @default(now())
+
+  @@map("billing_accounts")
+}
+
+model DataRetentionPolicy {
+  id           String   @id @default(uuid()) @db.Uuid
+  orgId        String   @db.Uuid
+  resourceType String
+  retainDays   Int
+  updatedAt    DateTime @updatedAt
+
+  @@unique([orgId, resourceType])
+  @@map("data_retention_policies")
+}
+
+model DeletionRequest {
+  id            String    @id @default(uuid()) @db.Uuid
+  orgId         String    @db.Uuid
+  resourceType  String
+  resourceId    String
+  resourceName  String
+  status        String    @default("PENDING")
+  requestedById String    @db.Uuid
+  confirmedText String
+  error         String?
+  createdAt     DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([orgId, createdAt])
+  @@map("deletion_requests")
+}
+
+model ConsentRecord {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  key       String
+  value     Boolean
+  actorId   String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  @@index([orgId, key])
+  @@map("consent_records")
+}
+
+model ConnectorAccount {
+  id             String          @id @default(uuid()) @db.Uuid
+  orgId          String          @db.Uuid
+  type           String
+  name           String
+  status         String          @default("PENDING")
+  credentialsEnc String?
+  config         Json            @default("{}")
+  lastHealthAt   DateTime?
+  lastSyncAt     DateTime?
+  lastError      String?
+  createdById    String?         @db.Uuid
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  deletedAt      DateTime?
+  syncs          ConnectorSync[]
+  jobs           ConnectorJob[]
+
+  @@index([orgId])
+  @@map("connector_accounts")
+}
+
+model ConnectorSync {
+  id                 String           @id @default(uuid()) @db.Uuid
+  orgId              String           @db.Uuid
+  connectorAccountId String           @db.Uuid
+  status             String
+  recordsRead        Int              @default(0)
+  error              String?
+  startedAt          DateTime         @default(now())
+  finishedAt         DateTime?
+  connector          ConnectorAccount @relation(fields: [connectorAccountId], references: [id], onDelete: Cascade)
+
+  @@index([connectorAccountId, startedAt])
+  @@map("connector_syncs")
+}
+
+model ConnectorJob {
+  id                 String           @id @default(uuid()) @db.Uuid
+  orgId              String           @db.Uuid
+  connectorAccountId String           @db.Uuid
+  processingJobId    String           @db.Uuid
+  operation          String
+  createdAt          DateTime         @default(now())
+  connector          ConnectorAccount @relation(fields: [connectorAccountId], references: [id], onDelete: Cascade)
+
+  @@index([connectorAccountId])
+  @@map("connector_jobs")
+}
+
+model WebhookEndpoint {
+  id         String            @id @default(uuid()) @db.Uuid
+  orgId      String            @db.Uuid
+  url        String
+  secretEnc  String
+  events     String[]
+  active     Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  deliveries WebhookDelivery[]
+
+  @@index([orgId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id              String          @id @default(uuid()) @db.Uuid
+  orgId           String          @db.Uuid
+  endpointId      String          @db.Uuid
+  event           String
+  payload         Json
+  status          String          @default("PENDING") // PENDING | DELIVERED | RETRYING | DEAD
+  attempts        Int             @default(0)
+  nextAttemptAt   DateTime        @default(now())
+  responseStatus  Int?
+  responseSnippet String?
+  lastError       String?
+  createdAt       DateTime        @default(now())
+  deliveredAt     DateTime?
+  endpoint        WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([endpointId, createdAt])
+  @@map("webhook_deliveries")
+}
+
+model File {
+  id          String        @id @default(uuid()) @db.Uuid
+  orgId       String        @db.Uuid
+  name        String
+  contentType String
+  size        Int
+  storageKey  String
+  checksum    String
+  purpose     String // SOURCE_UPLOAD | GUIDELINE | EXPORT | REPORT | CANARY_SCAN | CONNECTOR_ARTIFACT | TEMP
+  dataClass   String // REAL | SYNTHETIC | DERIVED | METADATA | GUIDELINE | AGGREGATE
+  createdById String?       @db.Uuid
+  createdAt   DateTime      @default(now())
+  deletedAt   DateTime?
+  versions    FileVersion[]
+
+  @@index([orgId, purpose])
+  @@map("files")
+}
+
+model FileVersion {
+  id         String   @id @default(uuid()) @db.Uuid
+  fileId     String   @db.Uuid
+  version    Int
+  storageKey String
+  size       Int
+  checksum   String
+  createdAt  DateTime @default(now())
+  file       File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@unique([fileId, version])
+  @@map("file_versions")
+}
+
+model ProcessingJob {
+  id              String     @id @default(uuid()) @db.Uuid
+  orgId           String     @db.Uuid
+  type            String
+  status          String     @default("QUEUED") // QUEUED | RUNNING | PAUSED | COMPLETED | FAILED | CANCELLED
+  progress        Float      @default(0)
+  processed       Int        @default(0)
+  total           Int        @default(0)
+  payload         Json       @default("{}")
+  checkpoint      Json?
+  result          Json?
+  error           String?
+  errorDetail     String?
+  attempts        Int        @default(0)
+  maxAttempts     Int        @default(3)
+  runAfter        DateTime   @default(now())
+  lockedAt        DateTime?
+  lockedBy        String?
+  heartbeatAt     DateTime?
+  cancelRequested Boolean    @default(false)
+  pauseRequested  Boolean    @default(false)
+  resourceType    String?
+  resourceId      String?
+  createdById     String?    @db.Uuid
+  createdAt       DateTime   @default(now())
+  startedAt       DateTime?
+  finishedAt      DateTime?
+  events          JobEvent[]
+
+  @@index([status, runAfter])
+  @@index([orgId, createdAt])
+  @@index([resourceType, resourceId])
+  @@map("processing_jobs")
+}
+
+model JobEvent {
+  id        String        @id @default(uuid()) @db.Uuid
+  jobId     String        @db.Uuid
+  level     String        @default("INFO")
+  message   String
+  data      Json?
+  createdAt DateTime      @default(now())
+  job       ProcessingJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, createdAt])
+  @@map("job_events")
+}
+
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  orgId     String    @db.Uuid
+  userId    String    @db.Uuid
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, orgId, readAt])
+  @@map("notifications")
+}
+
+model SavedView {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  projectId String   @db.Uuid
+  userId    String   @db.Uuid
+  name      String
+  filters   Json
+  shared    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@map("saved_views")
+}
+
+model Comment {
+  id           String   @id @default(uuid()) @db.Uuid
+  orgId        String   @db.Uuid
+  resourceType String
+  resourceId   String
+  userId       String   @db.Uuid
+  body         String
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, resourceType, resourceId])
+  @@map("comments")
+}
+
+model ActivityLog {
+  id           String   @id @default(uuid()) @db.Uuid
+  orgId        String   @db.Uuid
+  actorId      String?  @db.Uuid
+  actorType    String   @default("USER") // USER | SYSTEM | API_KEY | AI
+  actorLabel   String?
+  action       String
+  resourceType String
+  resourceId   String?
+  summary      String
+  before       Json?
+  after        Json?
+  details      Json?
+  ip           String?
+  userAgent    String?
+  jobId        String?
+  requestId    String?
+  createdAt    DateTime @default(now())
+
+  @@index([orgId, createdAt])
+  @@index([orgId, resourceType, resourceId])
+  @@map("activity_log")
+}
+
+model AiProvider {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @db.Uuid
+  provider  String // OPENAI_COMPATIBLE | ANTHROPIC | SELF_HOSTED
+  name      String
+  model     String
+  baseUrl   String?
+  apiKeyEnc String?
+  enabled   Boolean  @default(false)
+  config    Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orgId, name])
+  @@map("ai_providers")
+}
+
+// ─────────────────────────────── Stage 1: Firewall ───────────────────────────────
+
+model DataSource {
+  id                 String    @id @default(uuid()) @db.Uuid
+  orgId              String    @db.Uuid
+  name               String
+  description        String    @default("")
+  kind               String // DEMO | UPLOAD | CONNECTOR
+  connectorAccountId String?   @db.Uuid
+  status             String    @default("DRAFT") // DRAFT | INGESTING | SCANNING | NEEDS_REVIEW | SIGNED_OFF | ERROR
+  rowCount           Int       @default(0)
+  currentScanId      String?   @db.Uuid
+  signedOffScanId    String?   @db.Uuid
+  signedOffAt        DateTime?
+  signedOffById      String?   @db.Uuid
+  lastError          String?
+  createdById        String?   @db.Uuid
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  deletedAt          DateTime?
+
+  org       Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  tables    SourceTable[]
+  columns   SourceColumn[]
+  relations SourceRelation[]
+  scans     FirewallScan[]
+  sets      SyntheticSet[]
+
+  @@index([orgId, deletedAt])
+  @@map("data_sources")
+}
+
+model SourceTable {
+  id         String         @id @default(uuid()) @db.Uuid
+  orgId      String         @db.Uuid
+  sourceId   String         @db.Uuid
+  name       String
+  primaryKey String?
+  rowCount   Int            @default(0)
+  ordinal    Int            @default(0)
+  source     DataSource     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  columns    SourceColumn[]
+  rows       SourceRow[]
+
+  @@unique([sourceId, name])
+  @@map("source_tables")
+}
+
+model SourceColumn {
+  id             String    @id @default(uuid()) @db.Uuid
+  orgId          String    @db.Uuid
+  sourceId       String    @db.Uuid
+  tableId        String    @db.Uuid
+  name           String
+  ordinal        Int
+  dataType       String    @default("string")
+  format         String?
+  isPrimaryKey   Boolean   @default(false)
+  isForeignKey   Boolean   @default(false)
+  classification String    @default("UNSCANNED") // SENSITIVE | NEEDS_DECISION | NON_SENSITIVE | OUTCOME | IDENTIFIER | UNSCANNED
+  entityType     String?
+  explanation    String?
+  confidence     Float?
+  decision       String? // REPLACE | GENERALIZE | KEEP | DROP | SCRUB_TEXT | KEY
+  decisionSource String? // SYSTEM | HUMAN
+  generalization Json?
+  decidedById    String?   @db.Uuid
+  decidedAt      DateTime?
+
+  source    DataSource          @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  table     SourceTable         @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  findings  FirewallFinding[]
+  decisions FirewallDecision[]
+
+  @@unique([tableId, name])
+  @@index([sourceId])
+  @@map("source_columns")
+}
+
+model SourceRelation {
+  id          String     @id @default(uuid()) @db.Uuid
+  orgId       String     @db.Uuid
+  sourceId    String     @db.Uuid
+  fromTable   String
+  fromColumn  String
+  toTable     String
+  toColumn    String
+  kind        String     @default("MANY_TO_ONE")
+  confidence  Float
+  explanation String
+  confirmed   Boolean    @default(false)
+  source      DataSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, fromTable, fromColumn, toTable, toColumn])
+  @@map("source_relations")
+}
+
+/// REAL organizational data. Never leaves the Firewall/Twin boundary.
+model SourceRow {
+  id       String      @id @default(uuid()) @db.Uuid
+  orgId    String      @db.Uuid
+  sourceId String      @db.Uuid
+  tableId  String      @db.Uuid
+  rowIndex Int
+  data     Json
+  table    SourceTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@unique([tableId, rowIndex])
+  @@index([sourceId])
+  @@map("source_rows")
+}
+
+model FirewallScan {
+  id                String            @id @default(uuid()) @db.Uuid
+  orgId             String            @db.Uuid
+  sourceId          String            @db.Uuid
+  version           Int
+  status            String            @default("QUEUED")
+  classifierVersion String
+  sampleSize        Int
+  summary           Json?
+  jobId             String?           @db.Uuid
+  createdById       String?           @db.Uuid
+  createdAt         DateTime          @default(now())
+  completedAt       DateTime?
+  source            DataSource        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  findings          FirewallFinding[]
+
+  @@unique([sourceId, version])
+  @@map("firewall_scans")
+}
+
+model FirewallFinding {
+  id              String       @id @default(uuid()) @db.Uuid
+  scanId          String       @db.Uuid
+  columnId        String       @db.Uuid
+  classification  String
+  entityType      String?
+  suggestedAction String
+  explanation     String
+  confidence      Float
+  stats           Json
+  scan            FirewallScan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  column          SourceColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@unique([scanId, columnId])
+  @@map("firewall_findings")
+}
+
+model FirewallDecision {
+  id        String       @id @default(uuid()) @db.Uuid
+  orgId     String       @db.Uuid
+  columnId  String       @db.Uuid
+  scanId    String?      @db.Uuid
+  previous  String?
+  decision  String
+  source    String // SYSTEM | HUMAN
+  reason    String?
+  userId    String?      @db.Uuid
+  createdAt DateTime     @default(now())
+  column    SourceColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@index([columnId, createdAt])
+  @@map("firewall_decisions")
+}
+
+// ─────────────────────────────── Stage 1: Twin & Canary ───────────────────────────────
+
+model SyntheticSet {
+  id               String         @id @default(uuid()) @db.Uuid
+  orgId            String         @db.Uuid
+  sourceId         String         @db.Uuid
+  name             String
+  version          Int
+  seed             Int
+  multiplier       Float          @default(1)
+  algorithmVersion String
+  firewallScanId   String         @db.Uuid
+  config           Json
+  status           String         @default("QUEUED") // QUEUED | GENERATING | CHECKING | READY | SAFETY_HOLD | FAILED
+  safetyPassed     Boolean?
+  qualityReport    Json?
+  rowCount         Int            @default(0)
+  canaryCount      Int            @default(0)
+  jobId            String?        @db.Uuid
+  createdById      String?        @db.Uuid
+  createdAt        DateTime       @default(now())
+  completedAt      DateTime?
+  deletedAt        DateTime?
+  source           DataSource     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  rows             SyntheticRow[]
+  sends            Send[]
+
+  @@unique([sourceId, version])
+  @@index([orgId, deletedAt])
+  @@map("synthetic_sets")
+}
+
+model SyntheticRow {
+  id           String       @id @default(uuid()) @db.Uuid
+  orgId        String       @db.Uuid
+  setId        String       @db.Uuid
+  tableName    String
+  rowIndex     Int
+  syntheticKey String
+  data         Json
+  set          SyntheticSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+  tasks        Task[]
+
+  @@unique([setId, tableName, rowIndex])
+  @@index([setId, tableName, syntheticKey])
+  @@map("synthetic_rows")
+}
+
+model CanaryRegistry {
+  id             String     @id @default(uuid()) @db.Uuid
+  orgId          String     @db.Uuid
+  setId          String     @db.Uuid
+  syntheticRowId String     @db.Uuid
+  tableName      String
+  columnName     String
+  value          String
+  normalized     String
+  signature      String
+  entityType     String
+  generationMeta Json
+  createdAt      DateTime   @default(now())
+  exposures      Exposure[]
+  alerts         LeakAlert[]
+
+  @@index([orgId, normalized])
+  @@index([orgId, signature])
+  @@index([setId])
+  @@map("canary_registry")
+}
+
+model Send {
+  id            String       @id @default(uuid()) @db.Uuid
+  orgId         String       @db.Uuid
+  setId         String       @db.Uuid
+  recipient     String
+  recipientType String // LABELING_PROJECT | EXPORT | EXTERNAL_TOOL
+  channel       String
+  projectId     String?      @db.Uuid
+  exportId      String?      @db.Uuid
+  recordCount   Int
+  sentById      String?      @db.Uuid
+  createdAt     DateTime     @default(now())
+  set           SyntheticSet @relation(fields: [setId], references: [id], onDelete: Cascade)
+  exposures     Exposure[]
+
+  @@index([orgId, createdAt])
+  @@map("sends")
+}
+
+model Exposure {
+  id         String         @id @default(uuid()) @db.Uuid
+  orgId      String         @db.Uuid
+  sendId     String         @db.Uuid
+  registryId String         @db.Uuid
+  createdAt  DateTime       @default(now())
+  send       Send           @relation(fields: [sendId], references: [id], onDelete: Cascade)
+  registry   CanaryRegistry @relation(fields: [registryId], references: [id], onDelete: Cascade)
+
+  @@unique([sendId, registryId])
+  @@index([registryId])
+  @@map("exposures")
+}
+
+model CanaryScan {
+  id          String      @id @default(uuid()) @db.Uuid
+  orgId       String      @db.Uuid
+  inputType   String // TEXT | FILE | EXPORT | API
+  inputName   String
+  charCount   Int
+  matchCount  Int
+  candidates  Int
+  createdById String?     @db.Uuid
+  createdAt   DateTime    @default(now())
+  alerts      LeakAlert[]
+
+  @@index([orgId, createdAt])
+  @@map("canary_scans")
+}
+
+model LeakAlert {
+  id           String         @id @default(uuid()) @db.Uuid
+  orgId        String         @db.Uuid
+  scanId       String         @db.Uuid
+  registryId   String         @db.Uuid
+  matchedText  String
+  context      String
+  status       String         @default("OPEN") // OPEN | ACKNOWLEDGED | RESOLVED
+  note         String?
+  resolvedById String?        @db.Uuid
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  scan         CanaryScan     @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  registry     CanaryRegistry @relation(fields: [registryId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, status])
+  @@map("leak_alerts")
+}
+
+// ─────────────────────────────── Stage 2: Autonomous Labeling ───────────────────────────────
+
+model LabelProject {
+  id                       String    @id @default(uuid()) @db.Uuid
+  orgId                    String    @db.Uuid
+  name                     String
+  description              String    @default("")
+  purpose                  String    @default("")
+  setId                    String    @db.Uuid
+  sendId                   String    @db.Uuid
+  tableName                String
+  taskType                 String    @default("CLASSIFICATION")
+  labelSchema              Json
+  textFields               String[]
+  contextFields            String[]
+  sliceField               String?
+  carryOverField           Json?
+  config                   Json
+  status                   String    @default("SETUP") // SETUP | ACTIVE | COMPLETED | ARCHIVED
+  activeGuidelineVersionId String?   @db.Uuid
+  goldVersion              Int       @default(1)
+  goldLockedAt             DateTime?
+  createdById              String?   @db.Uuid
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+  deletedAt                DateTime?
+
+  org        Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  guidelines GuidelineDoc[]
+  examples   ExampleBank[]
+  tasks      Task[]
+  gold       GoldRecord[]
+  runs       EngineRun[]
+  exports    Export[]
+  members    ProjectMember[]
+
+  @@index([orgId, deletedAt])
+  @@map("label_projects")
+}
+
+model ProjectMember {
+  id        String       @id @default(uuid()) @db.Uuid
+  projectId String       @db.Uuid
+  userId    String       @db.Uuid
+  role      String // PROJECT_MANAGER | LABELER | REVIEWER | VIEWER
+  createdAt DateTime     @default(now())
+  project   LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+model GuidelineDoc {
+  id        String             @id @default(uuid()) @db.Uuid
+  orgId     String             @db.Uuid
+  projectId String             @db.Uuid
+  title     String
+  createdAt DateTime           @default(now())
+  project   LabelProject       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  versions  GuidelineVersion[]
+
+  @@map("guideline_docs")
+}
+
+model GuidelineVersion {
+  id           String       @id @default(uuid()) @db.Uuid
+  orgId        String       @db.Uuid
+  docId        String       @db.Uuid
+  projectId    String       @db.Uuid
+  version      Int
+  content      String
+  decisionTree Json?
+  status       String       @default("DRAFT") // DRAFT | PUBLISHED | SUPERSEDED
+  changeNote   String       @default("")
+  fileId       String?      @db.Uuid
+  createdById  String?      @db.Uuid
+  createdAt    DateTime     @default(now())
+  publishedAt  DateTime?
+  doc          GuidelineDoc @relation(fields: [docId], references: [id], onDelete: Cascade)
+
+  @@unique([docId, version])
+  @@map("guideline_versions")
+}
+
+model ExampleBank {
+  id          String       @id @default(uuid()) @db.Uuid
+  orgId       String       @db.Uuid
+  projectId   String       @db.Uuid
+  taskId      String?      @db.Uuid
+  text        String
+  labels      Json
+  explanation String       @default("")
+  source      String // SEED | REVIEW_CORRECTION | MANUAL
+  createdById String?      @db.Uuid
+  createdAt   DateTime     @default(now())
+  project     LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@map("example_bank")
+}
+
+model Task {
+  id             String       @id @default(uuid()) @db.Uuid
+  orgId          String       @db.Uuid
+  projectId      String       @db.Uuid
+  syntheticRowId String       @db.Uuid
+  ordinal        Int
+  status         String       @default("OPEN") // OPEN | LABELED | SKIPPED | FLAGGED | IN_REVIEW | DONE
+  priority       Float        @default(0)
+  priorityReason String?
+  sliceValue     String?
+  assignedToId   String?      @db.Uuid
+  finalLabels    Json?
+  finalSource    String?
+  finalLabelId   String?      @db.Uuid
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  project        LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  syntheticRow   SyntheticRow @relation(fields: [syntheticRowId], references: [id], onDelete: Cascade)
+  labels         Label[]
+  gold           GoldRecord?
+  engineItems    EngineItem[]
+
+  @@unique([projectId, syntheticRowId])
+  @@unique([projectId, ordinal])
+  @@index([projectId, status])
+  @@index([projectId, priority])
+  @@map("tasks")
+}
+
+model Label {
+  id                 String   @id @default(uuid()) @db.Uuid
+  orgId              String   @db.Uuid
+  projectId          String   @db.Uuid
+  taskId             String   @db.Uuid
+  userId             String?  @db.Uuid
+  values             Json
+  source             String // HUMAN | GOLD | REVIEW | ADJUDICATION | ENGINE_CARRY_OVER | ENGINE_RULE | ENGINE_MODEL | EXTERNAL_IMPORT
+  kind               String // WORK | GOLD | REVIEW | FINAL
+  engineRunId        String?  @db.Uuid
+  engineItemId       String?  @db.Uuid
+  guidelineVersionId String?  @db.Uuid
+  goldVersion        Int?
+  durationMs         Int?
+  note               String?
+  createdAt          DateTime @default(now())
+  task               Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, kind])
+  @@index([taskId, createdAt])
+  @@index([userId])
+  @@map("labels")
+}
+
+model GoldRecord {
+  id              String       @id @default(uuid()) @db.Uuid
+  orgId           String       @db.Uuid
+  projectId       String       @db.Uuid
+  taskId          String       @unique @db.Uuid
+  split           String // EXAMPLE | TUNING | LOCKED_TEST
+  sampling        String // RANDOM | COVERAGE | HARD_CASE | DISAGREEMENT | ACTIVE | MANUAL
+  selectionReason String
+  requiredLabels  Int          @default(1)
+  status          String       @default("PENDING") // PENDING | PARTIAL | NEEDS_ADJUDICATION | FINAL
+  finalLabels     Json?
+  goldVersion     Int
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  project         LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task            Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, split, status])
+  @@map("gold_records")
+}
+
+model Adjudication {
+  id            String   @id @default(uuid()) @db.Uuid
+  orgId         String   @db.Uuid
+  projectId     String   @db.Uuid
+  taskId        String   @db.Uuid
+  goldRecordId  String?  @db.Uuid
+  labelIds      String[]
+  finalValues   Json
+  reason        String
+  adjudicatorId String   @db.Uuid
+  createdAt     DateTime @default(now())
+
+  @@index([projectId])
+  @@map("adjudications")
+}
+
+model EngineRun {
+  id                 String       @id @default(uuid()) @db.Uuid
+  orgId              String       @db.Uuid
+  projectId          String       @db.Uuid
+  runNumber          Int
+  engineType         String // DEMO | AI
+  engineVersion      String
+  scope              String // ALL_UNLABELED | TARGETED | GUIDELINE_AFFECTED
+  config             Json
+  guidelineVersionId String?      @db.Uuid
+  goldVersion        Int
+  status             String       @default("QUEUED")
+  estimate           Json
+  spendCap           Float?
+  actualCost         Float        @default(0)
+  totals             Json?
+  jobId              String?      @db.Uuid
+  createdById        String?      @db.Uuid
+  createdAt          DateTime     @default(now())
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  project            LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  items              EngineItem[]
+
+  @@unique([projectId, runNumber])
+  @@map("engine_runs")
+}
+
+model EngineItem {
+  id                 String    @id @default(uuid()) @db.Uuid
+  orgId              String    @db.Uuid
+  runId              String    @db.Uuid
+  projectId          String    @db.Uuid
+  taskId             String    @db.Uuid
+  predicted          Json
+  source             String // CARRY_OVER | RULE | MODEL
+  confidence         Float
+  rationale          String
+  ruleCited          String?
+  modelInfo          Json
+  passes             Json
+  routing            String // AUTO_ACCEPT | REVIEW
+  routingReason      String
+  reviewStatus       String    @default("NOT_REQUIRED") // NOT_REQUIRED | PENDING | ACCEPTED | CORRECTED
+  reviewedById       String?   @db.Uuid
+  reviewedAt         DateTime?
+  guidelineVersionId String?   @db.Uuid
+  createdAt          DateTime  @default(now())
+  run                EngineRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task               Task      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, taskId])
+  @@index([projectId, routing, reviewStatus])
+  @@index([projectId, confidence])
+  @@map("engine_items")
+}
+
+model SetupTrial {
+  id          String   @id @default(uuid()) @db.Uuid
+  orgId       String   @db.Uuid
+  projectId   String   @db.Uuid
+  name        String
+  config      Json
+  metrics     Json
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+
+  @@index([projectId])
+  @@map("setup_trials")
+}
+
+model Export {
+  id             String       @id @default(uuid()) @db.Uuid
+  orgId          String       @db.Uuid
+  projectId      String       @db.Uuid
+  version        Int
+  format         String
+  status         String       @default("QUEUED") // QUEUED | BUILDING | BLOCKED | COMPLETED | FAILED
+  options        Json
+  gate           Json?
+  safety         Json?
+  manifest       Json?
+  dataCard       Json?
+  overrideReason String?
+  overrideById   String?      @db.Uuid
+  fileId         String?      @db.Uuid
+  recordCount    Int          @default(0)
+  checksum       String?
+  jobId          String?      @db.Uuid
+  createdById    String?      @db.Uuid
+  createdAt      DateTime     @default(now())
+  completedAt    DateTime?
+  deletedAt      DateTime?
+  project        LabelProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, version])
+  @@map("exports")
+}
+
+model ChatMessage {
+  id             String   @id @default(uuid()) @db.Uuid
+  orgId          String   @db.Uuid
+  projectId      String   @db.Uuid
+  userId         String?  @db.Uuid
+  role           String // USER | ASSISTANT
+  content        String
+  facts          Json?
+  proposal       Json?
+  proposalStatus String? // PENDING | APPLIED | REJECTED
+  createdAt      DateTime @default(now())
+
+  @@index([projectId, createdAt])
+  @@map("chat_messages")
+}
+
+model RateLimitBucket {
+  key         String   @id
+  windowStart DateTime
+  count       Int
+
+  @@map("rate_limit_buckets")
+}
