@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { api, qs } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useAction, useApi } from '../lib/hooks';
@@ -124,7 +124,7 @@ function KV({ value }: { value: Record<string, unknown> | null | undefined }) {
   if (!value) return <span className="muted">—</span>;
   return (
     <dl className="dl small">
-      {Object.entries(value).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v)).map(([k, v]) => <><dt key={`k-${k}`}>{humanize(k)}</dt><dd key={`v-${k}`}>{typeof v === 'number' ? (Number.isInteger(v) ? num(v) : dec(v, 3)) : String(v)}</dd></>)}
+      {Object.entries(value).filter(([, v]) => v === null || ['string', 'number', 'boolean'].includes(typeof v)).map(([k, v]) => <Fragment key={k}><dt>{humanize(k)}</dt><dd>{typeof v === 'number' ? (Number.isInteger(v) ? num(v) : dec(v, 3)) : String(v)}</dd></Fragment>)}
     </dl>
   );
 }

@@ -18,7 +18,7 @@ export interface ProjectConfig {
 }
 export interface Project {
   id: string; name: string; description: string; purpose: string; status: string; setId: string; tableName: string;
-  textFields: string[]; contextFields: string[]; sliceField: string | null; carryOverField: string | null;
+  textFields: string[]; contextFields: string[]; sliceField: string | null; carryOverField: { field?: string } | null;
   goldVersion: number; goldLockedAt: string | null; activeGuidelineVersionId: string | null; createdAt: string;
   labels: LabelDef[]; configResolved: ProjectConfig; counts: Record<string, number>;
   guideline: { id: string; version: number; content: string; decisionTree: DecisionNode | null; changeNote: string; publishedAt: string | null } | null;
@@ -239,7 +239,7 @@ export function ProjectOverview() {
             <dt>Auto-accept threshold</dt><dd>{p.configResolved.autoAcceptThreshold}</dd>
             <dt>Self-consistency passes</dt><dd>{p.configResolved.passes} (dropout {p.configResolved.dropout})</dd>
             <dt>Deterministic rules</dt><dd>{p.configResolved.rules.length}</dd>
-            <dt>Carried-over outcomes</dt><dd>{p.carryOverField ? (p.configResolved.carryOver.enabled ? `Enabled (${p.carryOverField})` : `Disabled (${p.carryOverField} available)`) : 'No field selected'}</dd>
+            <dt>Carried-over outcomes</dt><dd>{p.carryOverField?.field ? (p.configResolved.carryOver.enabled ? `Enabled (${p.carryOverField.field})` : `Disabled (${p.carryOverField.field} available)`) : 'No field selected'}</dd>
             <dt>Audit rate</dt><dd>{pct(p.configResolved.auditRate, 0)} of auto-accepted items</dd>
             <dt>Quality gate</dt><dd className="small">Accuracy ≥ {pct(p.configResolved.quality.minAccuracy, 0)}, locked test ≥ {p.configResolved.quality.minLockedTest}, review rate ≤ {pct(p.configResolved.quality.maxReviewRate, 0)}, audit accuracy ≥ {pct(p.configResolved.quality.minAuditAccuracy, 0)}</dd>
           </dl>
@@ -291,7 +291,7 @@ function ConfigModal({ project: p, onClose }: { project: Project; onClose: () =>
           <Field label="Token dropout"><input type="number" step="0.01" min={0} max={0.5} value={c.dropout} onChange={(e) => set({ dropout: Number(e.target.value) })} /></Field>
           <Field label="Seed"><input type="number" value={c.seed} onChange={(e) => set({ seed: Number(e.target.value) })} /></Field>
           <Field label="Audit rate"><input type="number" step="0.01" min={0} max={1} value={c.auditRate} onChange={(e) => set({ auditRate: Number(e.target.value) })} /></Field>
-          <label className="check" style={{ alignSelf: 'end' }}><input type="checkbox" disabled={!p.carryOverField} checked={c.carryOver.enabled} onChange={(e) => set({ carryOver: { enabled: e.target.checked } })} /> Use carried-over outcomes{p.carryOverField ? ` (${p.carryOverField})` : ''}</label>
+          <label className="check" style={{ alignSelf: 'end' }}><input type="checkbox" disabled={!p.carryOverField?.field} checked={c.carryOver.enabled} onChange={(e) => set({ carryOver: { enabled: e.target.checked } })} /> Use carried-over outcomes{p.carryOverField?.field ? ` (${p.carryOverField.field})` : ''}</label>
         </div>
         <fieldset>
           <legend>Quality gate</legend>

@@ -95,9 +95,10 @@ export class JobReporter {
 }
 
 export async function completeJob(jobId: string, result: unknown) {
+  const { total } = await prisma.processingJob.findUniqueOrThrow({ where: { id: jobId }, select: { total: true } });
   await prisma.processingJob.update({
     where: { id: jobId },
-    data: { status: 'COMPLETED', progress: 1, result: result as Prisma.InputJsonValue, finishedAt: new Date(), lockedBy: null },
+    data: { status: 'COMPLETED', progress: 1, processed: total, result: result as Prisma.InputJsonValue, finishedAt: new Date(), lockedBy: null },
   });
   await prisma.jobEvent.create({ data: { jobId, message: 'Completed' } });
 }
