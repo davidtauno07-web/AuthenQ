@@ -16,9 +16,9 @@
     "db:seed": "tsx --env-file-if-exists=../../.env prisma/seed.ts",
     "lint": "eslint src tests prisma --ext .ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:unit": "vitest run --dir src",
-    "test:e2e": "vitest run tests/acceptance.test.ts"
+    "test": "dotenv -e ../../.env -- vitest run",
+    "test:unit": "vitest run tests/domain.test.ts",
+    "test:e2e": "dotenv -e ../../.env -- vitest run tests/acceptance.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.664.0",

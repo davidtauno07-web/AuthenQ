@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: authenq
+          POSTGRES_PASSWORD: authenq
+          POSTGRES_DB: authenq
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U authenq" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CI: 'true'
+      NODE_ENV: test
+      APP_URL: http://localhost:5173
+      DATABASE_URL: postgresql://authenq:authenq@localhost:5432/authenq?schema=public
+      SESSION_SECRET: ci-session-secret-0123456789abcdef0123456789
+      ENCRYPTION_KEY: ci-encryption-key-0123456789abcdef0123456789
+      CANARY_SECRET: ci-canary-secret-0123456789abcdef0123456789
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: ./storage
+      EMAIL_DRIVER: log
+      DEMO_PASSWORD: ci-demo-password-Aq9!
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run db:generate
+      - run: npx prisma migrate deploy
+        working-directory: apps/api
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run db:seed
+      - run: npm test
+      - run: npm run build
