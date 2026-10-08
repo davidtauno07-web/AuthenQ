@@ -40,6 +40,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     window.addEventListener('aq:unauthorized', onUnauth);
     return () => window.removeEventListener('aq:unauthorized', onUnauth);
   }, [qc]);
+  // qc.clear() would also drop the auth/me query this provider observes, so the new user never reaches it.
+  const clearOtherQueries = () => qc.removeQueries({ predicate: (query) => query.queryKey[0] !== 'auth/me' });
   const me = q.data ?? null;
   const perms = new Set(me?.permissions ?? []);
   const value: AuthState = {
@@ -47,13 +49,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     loading: q.isLoading,
     can: (p) => perms.has(p),
     setMe: (m) => {
-      qc.clear();
+      clearOtherQueries();
       qc.setQueryData(['auth/me'], m);
     },
     refresh: () => q.refetch(),
     logout: async () => {
       await api.post('/auth/logout').catch(() => undefined);
-      qc.clear();
+      clearOtherQueries();
       qc.setQueryData(['auth/me'], null);
     },
   };
