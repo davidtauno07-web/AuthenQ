@@ -32,6 +32,11 @@ const schema = z.object({
   OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
   ANTHROPIC_API_KEY: z.string().optional(),
   DEMO_PASSWORD: z.string().default('AuthenQ!Demo2026'),
+  OUTBOUND_BLOCK_PRIVATE: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
+  OUTBOUND_PRIVATE_ALLOWLIST: z.string().default(''),
   LOG_LEVEL: z.string().default(isTest ? 'silent' : 'info'),
 });
 

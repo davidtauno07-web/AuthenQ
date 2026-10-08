@@ -208,3 +208,14 @@ describe('audit integrity', () => {
     await expect(prisma.activityLog.delete({ where: { id: entry.id } })).rejects.toThrow();
   });
 });
+
+describe('invitations', () => {
+  it('keeps an existing account INVITED until it accepts', async () => {
+    const other = await makeOrg('invitee');
+    createdOrgs.push(other.orgId);
+    const res = await a.agent.post('/api/v1/members/invite').set('x-csrf-token', a.csrf).send({ email: other.email, role: 'VIEWER' });
+    expect(res.status).toBe(201);
+    const m = await prisma.organizationMember.findUniqueOrThrow({ where: { orgId_userId: { orgId: a.orgId, userId: other.userId } } });
+    expect(m.status).toBe('INVITED');
+  });
+});

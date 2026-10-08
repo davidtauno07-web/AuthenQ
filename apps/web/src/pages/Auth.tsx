@@ -152,6 +152,8 @@ export function ForgotPassword() {
 export function ResetPassword() {
   const [params] = useSearchParams();
   const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
+  const [needMfa, setNeedMfa] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   return (
@@ -162,15 +164,22 @@ export function ResetPassword() {
           e.preventDefault();
           setError(null);
           try {
-            setMsg((await api.post<{ message: string }>('/auth/reset-password', { token: params.get('token') ?? '', password })).message);
+            setMsg((await api.post<{ message: string }>('/auth/reset-password', { token: params.get('token') ?? '', password, ...(needMfa ? { mfaCode } : {}) })).message);
           } catch (err) {
-            setError(err as ApiError);
+            const ae = err as ApiError;
+            if (ae.code === 'MFA_REQUIRED') setNeedMfa(true);
+            else setError(ae);
           }
         }}
       >
         <ErrorBox error={error} />
         {msg ? <div className="callout">{msg} <Link to="/login">Sign in</Link></div> : null}
         <Field label="New password" hint="At least 12 characters, with letters and numbers."><input type="password" autoComplete="new-password" minLength={12} required value={password} onChange={(e) => setPassword(e.target.value)} /></Field>
+        {needMfa ? (
+          <Field label="Authenticator code" hint="Your account uses two-factor authentication. Enter the 6-digit code to reset the password.">
+            <input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" required value={mfaCode} onChange={(e) => setMfaCode(e.target.value.trim())} />
+          </Field>
+        ) : null}
         <button className="primary" type="submit">Change password</button>
       </form>
     </AuthFrame>
@@ -198,7 +207,7 @@ export function AcceptInvite() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<ApiError | null>(null);
   return (
-    <AuthFrame title="Join your team" subtitle="Set your name and a password to accept the invitation.">
+    <AuthFrame title="Join your team" subtitle="Set your name and a password to accept the invitation. If you already have an account, confirm with its password.">
       <form
         className="stack"
         onSubmit={async (e) => {

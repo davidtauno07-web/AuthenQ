@@ -1,3 +1,4 @@
+import { readZip } from '../lib/zip.js';
 import { env } from '../config/env.js';
 import { prisma } from '../lib/prisma.js';
 import { badRequest, notFound } from '../lib/errors.js';
@@ -88,7 +89,10 @@ export async function scanExport(ctx: RequestContext, exportId: string) {
   const exp = await prisma.export.findFirst({ where: { id: exportId, orgId: ctx.orgId, deletedAt: null } });
   if (!exp?.fileId) throw notFound('Export file');
   const file = await prisma.file.findUniqueOrThrow({ where: { id: exp.fileId } });
-  const text = (await storage.get(file.storageKey)).toString('utf8');
+  const buf = await storage.get(file.storageKey);
+  // Export packages are zips; scan the decoded data file rather than the whole archive.
+  const dataEntry = buf.subarray(0, 2).toString('latin1') === 'PK' ? readZip(buf).find((e) => e.name.startsWith('data.')) : undefined;
+  const text = (dataEntry?.data ?? buf).toString('utf8');
   return scanText(ctx, { text, inputName: `Export v${exp.version} (${exp.format})`, inputType: 'EXPORT' });
 }
 

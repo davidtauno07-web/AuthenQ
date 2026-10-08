@@ -20,6 +20,8 @@ All configuration is read from environment variables (the API and worker load `.
 | `WORKER_POLL_MS` | no | Queue poll interval. |
 | `EMAIL_DRIVER` | no | `log` (development: links are written to the API log) or `smtp`. |
 | `SMTP_URL`, `EMAIL_FROM` | for `smtp` | Mail transport. Quote `EMAIL_FROM` if it contains spaces or `<>`. |
+| `OUTBOUND_BLOCK_PRIVATE` | no | `true`/`false`. Blocks webhooks, connectors and AI provider URLs that resolve to private, loopback or link-local addresses. Defaults to `true` in production, `false` otherwise. |
+| `OUTBOUND_PRIVATE_ALLOWLIST` | no | Comma-separated hosts that may be private even when blocking is on (e.g. an internal database or self-hosted model). |
 | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY` | no | Optional defaults for external AI providers. Providers can also be configured per organization in Settings → AI providers. |
 | `DEMO_PASSWORD` | seed only | Password for the seeded demo accounts. Never use in production. |
 

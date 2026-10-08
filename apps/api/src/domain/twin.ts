@@ -127,6 +127,8 @@ export function replaceValue(entityType: string | null, sample: string, rng: Rng
       return `${rng.int(10, 9899)} ${rng.pick(STREETS)} ${rng.pick(SUFFIX)}`;
     case 'IP_ADDRESS':
       return `198.51.100.${rng.int(1, 254)}`;
+    case 'SECRET':
+      return `[redacted-secret-${digits(rng, 6)}]`;
     default:
       return matchFormat(sample || 'XXXX-0000', rng);
   }

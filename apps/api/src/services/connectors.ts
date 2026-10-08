@@ -5,6 +5,7 @@ import { badRequest, notFound } from '../lib/errors.js';
 import { audit } from '../modules/audit.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue } from '../modules/jobs/queue.js';
+import { assertOutboundHost, blocksPrivateTargets } from '../lib/net.js';
 import { isFeatureEnabled } from '../modules/platform/events.js';
 import type { ParsedTable } from './firewall.js';
 
@@ -26,11 +27,25 @@ export async function availableConnectorTypes(orgId: string) {
   return out;
 }
 
+/** Connector hosts are checked against the outbound policy before every connection. */
+export async function assertConnectorTarget(connectionString: string) {
+  if (!blocksPrivateTargets()) return;
+  let u: URL;
+  try {
+    u = new URL(connectionString);
+  } catch {
+    throw badRequest('Use a single-host postgresql:// connection string.');
+  }
+  if (u.searchParams.has('host') || u.searchParams.has('hostaddr')) throw badRequest('Set the host in the connection string itself, not with a host parameter.');
+  await assertOutboundHost(u.hostname, 'Connector hosts');
+}
+
 function pgClient(connectionString: string) {
   return new pg.Client({ connectionString, statement_timeout: 60_000, query_timeout: 60_000, connectionTimeoutMillis: 10_000 });
 }
 
 export async function testPostgres(connectionString: string) {
+  await assertConnectorTarget(connectionString);
   const client = pgClient(connectionString);
   try {
     await client.connect();
@@ -44,6 +59,7 @@ export async function testPostgres(connectionString: string) {
 }
 
 export async function readPostgresTables(connectionString: string, tables: string[]): Promise<ParsedTable[]> {
+  await assertConnectorTarget(connectionString);
   const client = pgClient(connectionString);
   await client.connect();
   try {
@@ -70,6 +86,7 @@ export async function createConnector(ctx: RequestContext, input: { type: string
   const types = await availableConnectorTypes(ctx.orgId);
   if (!types.some((t) => t.type === input.type)) throw badRequest('This connector type is not available for your organization.');
   if (!/^postgres(ql)?:\/\//.test(input.connectionString)) throw badRequest('Use a postgresql:// connection string.');
+  await assertConnectorTarget(input.connectionString);
   const c = await prisma.connectorAccount.create({ data: { orgId: ctx.orgId, type: input.type, name: input.name, credentialsEnc: encryptSecret(input.connectionString), createdById: ctx.userId } });
   await audit(ctx, { action: 'connector.created', resourceType: 'connector', resourceId: c.id, summary: `Added ${input.type} connector "${input.name}"` });
   return { id: c.id, name: c.name, type: c.type, status: c.status };
@@ -96,6 +113,7 @@ export async function checkConnector(ctx: RequestContext, id: string) {
 
 export async function importFromConnector(ctx: RequestContext, id: string, sourceId: string, tables: string[]) {
   const c = await getConnector(ctx, id);
+  await assertConnectorTarget(decryptSecret(c.credentialsEnc!));
   const source = await prisma.dataSource.findFirst({ where: { id: sourceId, orgId: ctx.orgId, deletedAt: null } });
   if (!source) throw notFound('Data source');
   if (!tables.length || tables.length > 50) throw badRequest('Choose between 1 and 50 tables.');

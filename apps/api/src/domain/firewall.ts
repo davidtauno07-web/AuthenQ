@@ -59,6 +59,8 @@ export const TEXT_ENTITY_PATTERNS: Record<string, RegExp> = {
   SSN: /\b\d{3}-\d{2}-\d{4}\b/g,
   CREDIT_CARD: /\b(?:\d{4}[ -]?){3}\d{4}\b/g,
   ACCOUNT_ID: /\b(?:ACC|CUS|ORD|INV)-?\d{4,}\b/g,
+  SECRET:
+    /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}\b|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bxox[abpr]-[A-Za-z0-9-]{10,}\b|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}|(?<=\b(?:password|passwd|pwd|secret|token|api[_ -]?key)\s*[:=]\s*)[^\s,;]{4,}/gi,
 };
 
 const NAME_HINTS: [RegExp, string, Classification, Action][] = [

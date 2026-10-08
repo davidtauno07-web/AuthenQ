@@ -143,7 +143,9 @@ export async function sendToLabeling(ctx: RequestContext, input: SendInput) {
 export async function getProjectOrThrow(ctx: RequestContext, id: string) {
   const p = await prisma.labelProject.findFirst({ where: { id, orgId: ctx.orgId, deletedAt: null } });
   if (!p) throw notFound('Labeling project');
-  if (['LABELER', 'REVIEWER'].includes(ctx.roleKey) && ctx.userId) {
+  if (['LABELER', 'REVIEWER'].includes(ctx.roleKey)) {
+    // API keys have no user, so they never pass a project-membership check.
+    if (!ctx.userId) throw notFound('Labeling project');
     const m = await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId: id, userId: ctx.userId } } });
     if (!m) throw notFound('Labeling project');
   }
@@ -152,7 +154,10 @@ export async function getProjectOrThrow(ctx: RequestContext, id: string) {
 
 export async function listProjects(ctx: RequestContext) {
   const where: Prisma.LabelProjectWhereInput = { orgId: ctx.orgId, deletedAt: null };
-  if (['LABELER', 'REVIEWER'].includes(ctx.roleKey) && ctx.userId) where.members = { some: { userId: ctx.userId } };
+  if (['LABELER', 'REVIEWER'].includes(ctx.roleKey)) {
+    if (!ctx.userId) return [];
+    where.members = { some: { userId: ctx.userId } };
+  }
   const projects = await prisma.labelProject.findMany({ where, orderBy: { createdAt: 'desc' } });
   const counts = await prisma.task.groupBy({ by: ['projectId', 'status'], where: { projectId: { in: projects.map((p) => p.id) } }, _count: { _all: true } });
   return projects.map((p) => {
@@ -280,6 +285,11 @@ export async function listExamples(ctx: RequestContext, projectId: string) {
 export async function addExample(ctx: RequestContext, projectId: string, input: { text: string; label: string; explanation?: string; taskId?: string }) {
   const p = await getProjectOrThrow(ctx, projectId);
   if (!labelsOf(p).some((l) => l.value === input.label)) throw badRequest(`"${input.label}" is not a label in this project.`);
+  if (input.taskId) {
+    const task = await prisma.task.findFirst({ where: { id: input.taskId, projectId }, include: { gold: { select: { split: true } } } });
+    if (!task) throw notFound('Task');
+    if (task.gold?.split === 'LOCKED_TEST') throw badRequest('This task is in the locked test split. Locked-test records cannot become examples, because the engine must never train on them.');
+  }
   const ex = await prisma.exampleBank.create({
     data: { orgId: ctx.orgId, projectId, text: input.text, labels: { label: input.label }, explanation: input.explanation ?? '', source: input.taskId ? 'REVIEW_CORRECTION' : 'MANUAL', taskId: input.taskId, createdById: ctx.userId },
   });
@@ -491,9 +501,10 @@ export async function bulkLabel(ctx: RequestContext, projectId: string, taskIds:
 }
 
 export async function setTaskStatus(ctx: RequestContext, projectId: string, taskId: string, action: 'skip' | 'flag' | 'reopen', note?: string) {
-  await getProjectOrThrow(ctx, projectId);
-  const task = await prisma.task.findFirst({ where: { id: taskId, projectId } });
+  const p = await getProjectOrThrow(ctx, projectId);
+  const task = await prisma.task.findFirst({ where: { id: taskId, projectId }, include: { gold: { select: { split: true } } } });
   if (!task) throw notFound('Task');
+  if (p.goldLockedAt && task.gold?.split === 'LOCKED_TEST') throw badRequest('This task is in the locked test split. Unlock the gold set (creating a new gold version) before changing it.');
   const status = action === 'skip' ? 'SKIPPED' : action === 'flag' ? 'FLAGGED' : 'OPEN';
   if (action === 'reopen' && !can(ctx, 'labeling.review')) throw forbidden();
   await prisma.task.update({ where: { id: taskId }, data: { status, ...(action === 'reopen' ? { finalLabels: Prisma.DbNull, finalSource: null, finalLabelId: null } : {}) } });

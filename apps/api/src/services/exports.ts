@@ -1,3 +1,4 @@
+import { detectTextEntities } from '../domain/firewall.js';
 import { prisma, Prisma } from '../lib/prisma.js';
 import { sha256 } from '../lib/crypto.js';
 import { badRequest, forbidden, gateBlocked, notFound } from '../lib/errors.js';
@@ -175,12 +176,20 @@ export async function runExportJob(orgId: string, payload: { exportId: string },
       if (candidates.has(v) || candidates.has(v.replace(/\D/g, '')) && v.replace(/\D/g, '').length >= 7) realHits++;
     }
   }
+  // Free text is rebuilt from real sentences, so also block anything that still looks like a credential.
+  const secretLike = detectTextEntities(dataText).SECRET?.length ?? 0;
   const safety = {
     realValuesChecked: checkedValues.size,
     realValueMatches: realHits,
-    passed: realHits === 0,
+    secretLikeMatches: secretLike,
+    passed: realHits === 0 && secretLike === 0,
     dataClass: 'SYNTHETIC',
-    explanation: realHits === 0 ? `None of ${checkedValues.size} real sensitive values from the source were found in the export.` : `${realHits} real sensitive values were found in the export. The export was blocked.`,
+    explanation:
+      realHits > 0
+        ? `${realHits} real sensitive values were found in the export. The export was blocked.`
+        : secretLike > 0
+          ? `${secretLike} credential-like value(s) (keys, tokens or passwords) were found in the export. The export was blocked.`
+          : `None of ${checkedValues.size} real sensitive values from the source were found in the export, and no credential-like values were detected.`,
   };
   if (!safety.passed) {
     await prisma.export.update({ where: { id: exp.id }, data: { status: 'BLOCKED', safety } });

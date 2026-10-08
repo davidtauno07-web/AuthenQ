@@ -1,3 +1,4 @@
+import { assertOutboundUrl } from '../../lib/net.js';
 import { createHmac } from 'node:crypto';
 import { prisma, Prisma } from '../../lib/prisma.js';
 import { decryptSecret } from '../../lib/crypto.js';
@@ -43,6 +44,7 @@ export async function deliverPendingWebhooks(limit = 20, fetchImpl: typeof fetch
     let snippet = '';
     let error: string | null = null;
     try {
+      await assertOutboundUrl(d.endpoint.url, 'Webhook URLs');
       const res = await fetchImpl(d.endpoint.url, {
         method: 'POST',
         headers: {

@@ -23,6 +23,12 @@ function engineConfig(p: Project, override?: Partial<ProjectConfig>): EngineConf
  * example and tuning gold, and the example bank. Locked-test gold is never
  * used for training so evaluation stays independent.
  */
+/** Example-bank entries usable for training: never those tied to a locked-test task. */
+async function trainingExamplesWhere(projectId: string): Promise<Prisma.ExampleBankWhereInput> {
+  const locked = await prisma.goldRecord.findMany({ where: { projectId, split: 'LOCKED_TEST' }, select: { taskId: true } });
+  return { projectId, OR: [{ taskId: null }, { taskId: { notIn: locked.map((g) => g.taskId) } }] };
+}
+
 export async function trainModel(p: Project, opts: { excludeTuning?: boolean } = {}) {
   const labels = labelsOf(p).map((l) => l.value);
   const model = new NaiveBayes(labels);
@@ -35,7 +41,7 @@ export async function trainModel(p: Project, opts: { excludeTuning?: boolean } =
     select: { finalLabels: true, syntheticRow: { select: { data: true } } },
   });
   for (const t of tasks) model.train(tokenize(taskText(p, t.syntheticRow.data as Record<string, unknown>)), (t.finalLabels as { label: string }).label);
-  const examples = await prisma.exampleBank.findMany({ where: { projectId: p.id } });
+  const examples = await prisma.exampleBank.findMany({ where: await trainingExamplesWhere(p.id) });
   for (const e of examples) model.train(tokenize(e.text), (e.labels as { label: string }).label);
   return { model, trainedOn: tasks.length + examples.length };
 }
@@ -117,7 +123,7 @@ export async function runEngineJob(orgId: string, payload: { runId: string }, re
   const carryField = (p.carryOverField as { field?: string } | null)?.field;
   const guideline = p.activeGuidelineVersionId ? await prisma.guidelineVersion.findUnique({ where: { id: p.activeGuidelineVersionId } }) : null;
   const provider = run.engineType === 'AI' ? await prisma.aiProvider.findFirst({ where: { orgId, enabled: true } }) : null;
-  const examples = run.engineType === 'AI' ? await prisma.exampleBank.findMany({ where: { projectId: p.id }, take: 20 }) : [];
+  const examples = run.engineType === 'AI' ? await prisma.exampleBank.findMany({ where: await trainingExamplesWhere(p.id), take: 20 }) : [];
   const totals = { processed: done.size, autoAccepted: 0, review: 0, bySource: {} as Record<string, number> };
   let cost = run.actualCost;
   for (let i = 0; i < tasks.length; i++) {
@@ -241,7 +247,9 @@ export async function getRun(ctx: RequestContext, projectId: string, runId: stri
 export async function reviewQueue(ctx: RequestContext, projectId: string, mode: 'review' | 'audit', limit: number, offset: number) {
   const p = await getProjectOrThrow(ctx, projectId);
   const where: Prisma.EngineItemWhereInput =
-    mode === 'review' ? { projectId, routing: 'REVIEW', reviewStatus: 'PENDING' } : { projectId, routing: 'AUTO_ACCEPT', reviewStatus: 'NOT_REQUIRED' };
+    mode === 'review'
+      ? { projectId, routing: 'REVIEW', reviewStatus: 'PENDING', task: { NOT: { gold: { split: 'LOCKED_TEST' } } } }
+      : { projectId, routing: 'AUTO_ACCEPT', reviewStatus: 'NOT_REQUIRED', task: { NOT: { gold: { split: 'LOCKED_TEST' } } } };
   const total = await prisma.engineItem.count({ where });
   let items;
   if (mode === 'audit') {
@@ -277,8 +285,9 @@ export async function reviewQueue(ctx: RequestContext, projectId: string, mode: 
 
 export async function reviewItem(ctx: RequestContext, projectId: string, itemId: string, input: { action: 'accept' | 'correct'; label?: string; note?: string; addToExamples?: boolean }) {
   const p = await getProjectOrThrow(ctx, projectId);
-  const item = await prisma.engineItem.findFirst({ where: { id: itemId, projectId }, include: { task: { include: { syntheticRow: true } } } });
+  const item = await prisma.engineItem.findFirst({ where: { id: itemId, projectId }, include: { task: { include: { syntheticRow: true, gold: { select: { split: true } } } } } });
   if (!item) throw notFound('Engine item');
+  if (item.task.gold?.split === 'LOCKED_TEST') throw badRequest('This task is in the locked test split. Its label comes from the Gold workflow and cannot be set through engine review.');
   if (['ACCEPTED', 'CORRECTED'].includes(item.reviewStatus)) throw badRequest('This item has already been reviewed.');
   const predicted = (item.predicted as { label: string }).label;
   const final = input.action === 'accept' ? predicted : input.label;

@@ -31,7 +31,17 @@ function cleanName(raw: string, fallback: string) {
 function normalizeRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
   if (rows.length > MAX_ROWS) throw badRequest(`The file has ${rows.length.toLocaleString()} rows; the limit per table is ${MAX_ROWS.toLocaleString()}.`);
   const keys = new Map<string, string>();
-  for (const r of rows.slice(0, 1000)) for (const k of Object.keys(r)) if (!keys.has(k)) keys.set(k, cleanName(k, `column_${keys.size + 1}`));
+  const used = new Set<string>();
+  for (const r of rows.slice(0, 1000)) {
+    for (const k of Object.keys(r)) {
+      if (keys.has(k)) continue;
+      const base = cleanName(k, `column_${keys.size + 1}`);
+      let name = base;
+      for (let n = 2; used.has(name); n++) name = `${base.slice(0, 58)}_${n}`;
+      used.add(name);
+      keys.set(k, name);
+    }
+  }
   if (keys.size > MAX_COLUMNS) throw badRequest(`The file has ${keys.size} columns; the limit is ${MAX_COLUMNS}.`);
   if (!keys.size) throw badRequest('No columns were found in the file. Check that the first row contains column headers.');
   return rows.map((r) => {
@@ -131,7 +141,7 @@ export async function getSourceDetail(ctx: RequestContext, id: string) {
 export function firewallGate(source: {
   status: string;
   currentScanId: string | null;
-  tables: { name: string; columns: { name: string; classification: string; decision: string | null; decisionSource: string | null }[] }[];
+  tables: { name: string; columns: { name: string; classification: string; decision: string | null; decisionSource: string | null; entityType?: string | null }[] }[];
 }) {
   const reasons: string[] = [];
   if (!source.currentScanId) reasons.push('No Firewall scan has completed yet.');
@@ -141,6 +151,7 @@ export function firewallGate(source: {
       if (c.classification === 'UNSCANNED') reasons.push(`${t.name}.${c.name} has not been scanned.`);
       else if (c.classification === 'NEEDS_DECISION' && c.decisionSource !== 'HUMAN') reasons.push(`${t.name}.${c.name} needs a human decision.`);
       else if (c.classification === 'SENSITIVE' && c.decision === 'KEEP') reasons.push(`${t.name}.${c.name} is sensitive but set to Keep.`);
+      else if (c.classification === 'SENSITIVE' && c.decision === 'SCRUB_TEXT' && c.entityType !== undefined && c.entityType !== 'FREE_TEXT') reasons.push(`${t.name}.${c.name} is not free text, so Scrub text cannot protect it. Choose Replace, Generalize or Drop.`);
     }
   }
   return { ready: reasons.length === 0, reasons };
@@ -193,35 +204,47 @@ export async function uploadToSource(ctx: RequestContext, sourceId: string, file
   return { job, preview: tables.map((t) => ({ name: t.name, rows: t.rows.length, columns: Object.keys(t.rows[0] ?? {}) })) };
 }
 
-/** Writes parsed tables as real source rows. Replaces rows of tables with the same name. */
+/**
+ * Writes parsed tables as real source rows. Replaces rows of tables with the same name.
+ * Runs in one transaction so a failed import leaves the previous rows intact, and
+ * locks the source row so a concurrent deletion cannot be undone by a late import.
+ */
 export async function ingestTables(orgId: string, sourceId: string, tables: ParsedTable[], reporter?: JobReporter) {
   const total = tables.reduce((a, t) => a + t.rows.length, 0);
   let done = 0;
-  const existingCount = await prisma.sourceTable.count({ where: { sourceId } });
-  for (const [i, t] of tables.entries()) {
-    const existing = await prisma.sourceTable.findUnique({ where: { sourceId_name: { sourceId, name: t.name } } });
-    if (existing) {
-      await prisma.sourceRow.deleteMany({ where: { tableId: existing.id } });
-      await prisma.sourceColumn.deleteMany({ where: { tableId: existing.id } });
-    }
-    const table = existing
-      ? await prisma.sourceTable.update({ where: { id: existing.id }, data: { rowCount: t.rows.length } })
-      : await prisma.sourceTable.create({ data: { orgId, sourceId, name: t.name, rowCount: t.rows.length, ordinal: existingCount + i } });
-    const colNames = Object.keys(t.rows[0] ?? {});
-    await prisma.sourceColumn.createMany({
-      data: colNames.map((name, ordinal) => ({ orgId, sourceId, tableId: table.id, name, ordinal })),
-    });
-    for (let start = 0; start < t.rows.length; start += 1000) {
-      const chunk = t.rows.slice(start, start + 1000);
-      await prisma.sourceRow.createMany({
-        data: chunk.map((data, k) => ({ orgId, sourceId, tableId: table.id, rowIndex: start + k, data: data as Prisma.InputJsonValue })),
-      });
-      done += chunk.length;
-      await reporter?.progress(done, total);
-    }
-  }
-  const rowCount = await prisma.sourceTable.aggregate({ where: { sourceId }, _sum: { rowCount: true } });
-  await prisma.dataSource.update({ where: { id: sourceId }, data: { rowCount: rowCount._sum.rowCount ?? 0 } });
+  return prisma.$transaction(
+    async (tx) => {
+      const locked = await tx.$queryRaw<{ deletedAt: Date | null }[]>`SELECT "deletedAt" FROM data_sources WHERE id = ${sourceId}::uuid AND "orgId" = ${orgId}::uuid FOR UPDATE`;
+      if (!locked.length || locked[0]!.deletedAt) return { skipped: true as const };
+      const existingCount = await tx.sourceTable.count({ where: { sourceId } });
+      for (const [i, t] of tables.entries()) {
+        const existing = await tx.sourceTable.findUnique({ where: { sourceId_name: { sourceId, name: t.name } } });
+        if (existing) {
+          await tx.sourceRow.deleteMany({ where: { tableId: existing.id } });
+          await tx.sourceColumn.deleteMany({ where: { tableId: existing.id } });
+        }
+        const table = existing
+          ? await tx.sourceTable.update({ where: { id: existing.id }, data: { rowCount: t.rows.length } })
+          : await tx.sourceTable.create({ data: { orgId, sourceId, name: t.name, rowCount: t.rows.length, ordinal: existingCount + i } });
+        const colNames = Object.keys(t.rows[0] ?? {});
+        await tx.sourceColumn.createMany({
+          data: colNames.map((name, ordinal) => ({ orgId, sourceId, tableId: table.id, name, ordinal })),
+        });
+        for (let start = 0; start < t.rows.length; start += 1000) {
+          const chunk = t.rows.slice(start, start + 1000);
+          await tx.sourceRow.createMany({
+            data: chunk.map((data, k) => ({ orgId, sourceId, tableId: table.id, rowIndex: start + k, data: data as Prisma.InputJsonValue })),
+          });
+          done += chunk.length;
+          await reporter?.progress(done, total);
+        }
+      }
+      const rowCount = await tx.sourceTable.aggregate({ where: { sourceId }, _sum: { rowCount: true } });
+      await tx.dataSource.update({ where: { id: sourceId }, data: { rowCount: rowCount._sum.rowCount ?? 0 } });
+      return { skipped: false as const };
+    },
+    { timeout: 30 * 60_000, maxWait: 30_000 },
+  );
 }
 
 export async function runIngestJob(
@@ -229,6 +252,11 @@ export async function runIngestJob(
   payload: { sourceId: string; fileId?: string; tableName?: string | null; connectorId?: string; syncId?: string; tables?: string[] },
   reporter: JobReporter,
 ) {
+  const target = await prisma.dataSource.findFirst({ where: { id: payload.sourceId, orgId }, select: { deletedAt: true } });
+  if (!target || target.deletedAt) {
+    await reporter.event('The data source was deleted before the import ran. Nothing was imported.');
+    return { tables: [], scanId: null, skipped: true };
+  }
   let tables: ParsedTable[];
   if (payload.connectorId) {
     const { readPostgresTables } = await import('./connectors.js');
@@ -249,7 +277,11 @@ export async function runIngestJob(
     tables = await parseUpload(file.name, buffer, payload.tableName ?? undefined);
   }
   await reporter.event(`Parsed ${tables.length} table(s)`);
-  await ingestTables(orgId, payload.sourceId, tables, reporter);
+  const ingest = await ingestTables(orgId, payload.sourceId, tables, reporter);
+  if (ingest.skipped) {
+    await reporter.event('The data source was deleted during the import. Nothing was imported.');
+    return { tables: [], scanId: null, skipped: true };
+  }
   const scan = await queueScan(orgId, payload.sourceId, null);
   return { tables: tables.map((t) => ({ name: t.name, rows: t.rows.length })), scanId: scan.id };
 }
@@ -369,6 +401,12 @@ export async function decideColumn(ctx: RequestContext, columnId: string, input:
     throw badRequest(`${col.table.name}.${col.name} is classified as sensitive. Choose Replace, Generalize, Scrub text or Drop — sensitive values cannot be kept.`);
   }
   if (input.decision === 'KEY' && !col.isPrimaryKey && !col.isForeignKey) throw badRequest('Only primary or foreign key columns can use the Key action.');
+  if (input.decision === 'SCRUB_TEXT' && col.entityType !== 'FREE_TEXT') {
+    throw badRequest(`${col.table.name}.${col.name} is not a free-text column. Scrub text only rebuilds free text; choose Replace, Generalize or Drop.`);
+  }
+  if (col.classification === 'NEEDS_DECISION' && input.decision === 'KEEP' && !input.reason?.trim()) {
+    throw badRequest(`${col.table.name}.${col.name} may be identifying. Give a short reason for keeping its real values.`);
+  }
   if (col.decisionSource === 'SYSTEM' && col.decision !== input.decision && !input.reason?.trim()) {
     throw badRequest('Give a short reason when overriding the Firewall suggestion.');
   }

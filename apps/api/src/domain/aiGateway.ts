@@ -1,3 +1,4 @@
+import { assertOutboundUrl } from '../lib/net.js';
 import { z } from 'zod';
 import { securityViolation } from '../lib/errors.js';
 
@@ -55,6 +56,7 @@ export type Transport = (cfg: AiProviderConfig, system: string, user: string) =>
 
 export const httpTransport: Transport = async (cfg, system, user) => {
   if (!cfg.apiKey && cfg.provider !== 'SELF_HOSTED') throw new Error('No API key configured for this provider');
+  if (cfg.baseUrl) await assertOutboundUrl(cfg.baseUrl, 'AI provider URLs');
   if (cfg.provider === 'ANTHROPIC') {
     const res = await fetch(`${cfg.baseUrl ?? 'https://api.anthropic.com'}/v1/messages`, {
       method: 'POST',

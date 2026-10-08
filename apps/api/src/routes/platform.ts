@@ -7,8 +7,9 @@ import { asyncHandler, pageOf, param, parse } from '../lib/http.js';
 import { env } from '../config/env.js';
 import { requirePermission } from '../middleware/auth.js';
 import { audit } from '../modules/audit.js';
-import { API_KEY_SCOPES, PERMISSIONS, SYSTEM_ROLES } from '../modules/authz.js';
-import { ctxOf } from '../modules/context.js';
+import { API_KEY_SCOPES, PERMISSIONS, SYSTEM_ROLES, type PermissionKey } from '../modules/authz.js';
+import { ctxOf, type RequestContext } from '../modules/context.js';
+import { assertOutboundUrl } from '../lib/net.js';
 import { controlJob, getJob } from '../modules/jobs/queue.js';
 import { WEBHOOK_EVENTS } from '../modules/platform/events.js';
 import { issueToken } from '../modules/auth/routes.js';
@@ -67,15 +68,28 @@ platformRouter.get('/search', asyncHandler(async (req, res) => {
 }));
 
 // ── Jobs ─────────────────────────────────────────────────────────────────────
+// Job events describe the resource they process, so they follow that resource's read permission.
+const JOB_RESOURCE_PERMISSION: Record<string, PermissionKey> = { data_source: 'sources.read', synthetic_set: 'synthetic.read', engine_run: 'engine.run', export: 'exports.read' };
+function jobVisibility(ctx: RequestContext): Prisma.ProcessingJobWhereInput {
+  if (ctx.roleKey === 'ADMIN') return {};
+  const types = Object.entries(JOB_RESOURCE_PERMISSION).filter(([, p]) => ctx.permissions.has(p)).map(([t]) => t);
+  return { OR: [...(ctx.userId ? [{ createdById: ctx.userId }] : []), { resourceType: { in: types } }] };
+}
+function canSeeJob(ctx: RequestContext, job: { createdById: string | null; resourceType: string | null }) {
+  if (ctx.roleKey === 'ADMIN' || (ctx.userId && job.createdById === ctx.userId)) return true;
+  const perm = job.resourceType ? JOB_RESOURCE_PERMISSION[job.resourceType] : undefined;
+  return !!perm && ctx.permissions.has(perm);
+}
 platformRouter.get('/jobs', asyncHandler(async (req, res) => {
   const { limit, offset } = pageOf(req.query);
-  const where: Prisma.ProcessingJobWhereInput = { orgId: ctxOf(req).orgId, ...(req.query.status ? { status: String(req.query.status) } : {}), ...(req.query.resourceId ? { resourceId: String(req.query.resourceId) } : {}) };
+  const where: Prisma.ProcessingJobWhereInput = { orgId: ctxOf(req).orgId, ...jobVisibility(ctxOf(req)), ...(req.query.status ? { status: String(req.query.status) } : {}), ...(req.query.resourceId ? { resourceId: String(req.query.resourceId) } : {}) };
   const [items, total] = await Promise.all([prisma.processingJob.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit, skip: offset }).then((rows) => rows.map(({ payload: _p, errorDetail: _e, ...r }) => r)), prisma.processingJob.count({ where })]);
   res.json({ items, total });
 }));
 platformRouter.get('/jobs/:id', asyncHandler(async (req, res) => {
   const ctx = ctxOf(req);
   const job = await getJob(ctx.orgId, param(req, 'id'));
+  if (!canSeeJob(ctx, job)) throw notFound('Job');
   res.json({ ...job, payload: undefined, errorDetail: ctx.roleKey === 'ADMIN' ? job.errorDetail : undefined });
 }));
 platformRouter.post('/jobs/:id/:action(cancel|pause|resume|retry)', asyncHandler(async (req, res) => {
@@ -150,11 +164,16 @@ platformRouter.post('/members/invite', requirePermission('members.manage'), asyn
   const user = (await prisma.user.findUnique({ where: { email: body.email } })) ?? (await prisma.user.create({ data: { email: body.email, name: body.name ?? body.email.split('@')[0]! } }));
   const existing = await prisma.organizationMember.findUnique({ where: { orgId_userId: { orgId: ctx.orgId, userId: user.id } } });
   if (existing?.status === 'ACTIVE') throw conflict('This person is already a member.');
-  await prisma.organizationMember.upsert({ where: { orgId_userId: { orgId: ctx.orgId, userId: user.id } }, create: { orgId: ctx.orgId, userId: user.id, roleId: role.id, status: user.passwordHash ? 'ACTIVE' : 'INVITED' }, update: { roleId: role.id, status: user.passwordHash ? 'ACTIVE' : 'INVITED' } });
-  if (!user.passwordHash) {
-    const token = await issueToken(user.id, 'INVITE', 72);
-    await sendEmail(user.email, 'You have been invited to AuthenQ', `Open ${env.APP_URL}/accept-invite?token=${token} to join.`);
-  }
+  await prisma.organizationMember.upsert({ where: { orgId_userId: { orgId: ctx.orgId, userId: user.id } }, create: { orgId: ctx.orgId, userId: user.id, roleId: role.id, status: 'INVITED' }, update: { roleId: role.id, status: 'INVITED' } });
+  // Membership stays INVITED until the invitee accepts, even if they already have an account.
+  const token = await issueToken(user.id, 'INVITE', 72);
+  await sendEmail(
+    user.email,
+    'You have been invited to AuthenQ',
+    user.passwordHash
+      ? `Open ${env.APP_URL}/accept-invite?token=${token} and confirm with your existing AuthenQ password to join.`
+      : `Open ${env.APP_URL}/accept-invite?token=${token} to join.`,
+  );
   await audit(ctx, { action: 'member.invited', resourceType: 'member', resourceId: user.id, summary: `Invited ${body.email} as ${role.name}` });
   res.status(201).json({ ok: true });
 }));
@@ -208,7 +227,7 @@ platformRouter.delete('/api-keys/:id', requirePermission('apikeys.manage'), asyn
 }));
 
 // ── Webhooks ─────────────────────────────────────────────────────────────────
-function validateWebhookUrl(url: string) {
+async function validateWebhookUrl(url: string) {
   let u: URL;
   try {
     u = new URL(url);
@@ -217,7 +236,7 @@ function validateWebhookUrl(url: string) {
   }
   if (env.NODE_ENV === 'production' && u.protocol !== 'https:') throw badRequest('Webhook URLs must use HTTPS.');
   if (!['http:', 'https:'].includes(u.protocol)) throw badRequest('Webhook URLs must use HTTP or HTTPS.');
-  if (env.NODE_ENV === 'production' && /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|0\.0\.0\.0|\[?::1\]?)/.test(u.hostname)) throw badRequest('Webhook URLs cannot point to private or local addresses.');
+  await assertOutboundUrl(url, 'Webhook URLs');
 }
 platformRouter.get('/webhooks', requirePermission('webhooks.manage'), asyncHandler(async (req, res) => {
   const rows = await prisma.webhookEndpoint.findMany({ where: { orgId: ctxOf(req).orgId }, orderBy: { createdAt: 'desc' }, include: { deliveries: { orderBy: { createdAt: 'desc' }, take: 10 } } });
@@ -227,7 +246,7 @@ platformRouter.get('/webhooks', requirePermission('webhooks.manage'), asyncHandl
 platformRouter.post('/webhooks', requirePermission('webhooks.manage'), asyncHandler(async (req, res) => {
   const ctx = ctxOf(req);
   const body = parse(z.object({ url: z.string().max(500), events: z.array(z.enum(WEBHOOK_EVENTS)).min(1) }), req.body);
-  validateWebhookUrl(body.url);
+  await validateWebhookUrl(body.url);
   const secret = `whsec_${randomToken(24)}`;
   const ep = await prisma.webhookEndpoint.create({ data: { orgId: ctx.orgId, url: body.url, events: body.events, secretEnc: encryptSecret(secret) } });
   await audit(ctx, { action: 'webhook.created', resourceType: 'webhook', resourceId: ep.id, summary: `Added webhook ${body.url} for ${body.events.join(', ')}` });
@@ -314,6 +333,7 @@ platformRouter.get('/ai-providers', requirePermission('ai.manage'), asyncHandler
 platformRouter.post('/ai-providers', requirePermission('ai.manage'), asyncHandler(async (req, res) => {
   const ctx = ctxOf(req);
   const body = parse(z.object({ provider: z.enum(['OPENAI_COMPATIBLE', 'ANTHROPIC', 'SELF_HOSTED']), name: z.string().min(2).max(80), model: z.string().min(1).max(120), baseUrl: z.string().url().max(300).optional(), apiKey: z.string().max(500).optional(), enabled: z.boolean().default(false) }), req.body);
+  if (body.baseUrl) await assertOutboundUrl(body.baseUrl, 'AI provider URLs');
   const p = await prisma.aiProvider.create({ data: { orgId: ctx.orgId, provider: body.provider, name: body.name, model: body.model, baseUrl: body.baseUrl, apiKeyEnc: body.apiKey ? encryptSecret(body.apiKey) : null, enabled: body.enabled } });
   await audit(ctx, { action: 'ai_provider.created', resourceType: 'ai_provider', resourceId: p.id, summary: `Added AI provider ${body.name} (${body.provider}, ${body.model})${body.enabled ? ', enabled' : ''}` });
   res.status(201).json({ id: p.id });

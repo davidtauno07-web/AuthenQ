@@ -7,7 +7,7 @@ export const SESSION_COOKIE = 'aq_session';
 export const CSRF_COOKIE = 'aq_csrf';
 const GRACE_MS = 2 * 60_000;
 
-const cookieBase = { sameSite: 'lax' as const, secure: isProduction, path: '/' };
+const cookieBase = { sameSite: 'lax' as const, secure: isProduction || env.APP_URL.startsWith('https://'), path: '/' };
 
 export function setSessionCookies(res: Response, token: string, csrf: string, expiresAt: Date) {
   res.cookie(SESSION_COOKIE, token, { ...cookieBase, httpOnly: true, expires: expiresAt });

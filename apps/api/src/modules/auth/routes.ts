@@ -31,12 +31,22 @@ async function issueToken(userId: string, type: 'EMAIL_VERIFY' | 'PASSWORD_RESET
   return token;
 }
 
-async function consumeToken(token: string, type: string) {
+async function findValidToken(token: string, type: string) {
   const record = await prisma.authToken.findUnique({ where: { tokenHash: sha256(token) } });
   if (!record || record.type !== type || record.usedAt || record.expiresAt < new Date()) {
     throw badRequest('This link is invalid or has expired. Request a new one.');
   }
-  await prisma.authToken.update({ where: { id: record.id }, data: { usedAt: new Date() } });
+  return record;
+}
+
+async function markTokenUsed(id: string) {
+  const r = await prisma.authToken.updateMany({ where: { id, usedAt: null }, data: { usedAt: new Date() } });
+  if (!r.count) throw badRequest('This link is invalid or has expired. Request a new one.');
+}
+
+async function consumeToken(token: string, type: string) {
+  const record = await findValidToken(token, type);
+  await markTokenUsed(record.id);
   return record;
 }
 
@@ -171,8 +181,15 @@ authRouter.post(
   '/reset-password',
   rateLimit('reset', 10, 900, ipKey('reset')),
   asyncHandler(async (req, res) => {
-    const body = parse(z.object({ token: z.string().min(20), password }), req.body);
-    const record = await consumeToken(body.token, 'PASSWORD_RESET');
+    const body = parse(z.object({ token: z.string().min(20), password, mfaCode: z.string().max(10).optional() }), req.body);
+    const record = await findValidToken(body.token, 'PASSWORD_RESET');
+    // A reset link alone must not take over an MFA-protected account.
+    const factor = await prisma.mfaFactor.findFirst({ where: { userId: record.userId, verifiedAt: { not: null } } });
+    if (factor) {
+      if (!body.mfaCode) throw new AppError(401, 'MFA_REQUIRED', 'Enter the 6-digit code from your authenticator app to reset your password.');
+      if (!verifyTotp(decryptSecret(factor.secretEnc), body.mfaCode)) throw new AppError(401, 'MFA_INVALID', 'The authentication code is incorrect.');
+    }
+    await markTokenUsed(record.id);
     await prisma.user.update({ where: { id: record.userId }, data: { passwordHash: await hashPassword(body.password), failedLoginCount: 0, lockedUntil: null } });
     await prisma.session.updateMany({ where: { userId: record.userId, revokedAt: null }, data: { revokedAt: new Date() } });
     await prisma.securityEvent.create({ data: { userId: record.userId, type: 'PASSWORD_RESET', ip: req.ip } });
@@ -195,11 +212,19 @@ authRouter.post(
   rateLimit('invite', 10, 900, ipKey('invite')),
   asyncHandler(async (req, res) => {
     const body = parse(z.object({ token: z.string().min(20), name: z.string().trim().min(1).max(120), password }), req.body);
-    const record = await consumeToken(body.token, 'INVITE');
-    const user = await prisma.user.update({
-      where: { id: record.userId },
-      data: { name: body.name, passwordHash: await hashPassword(body.password), emailVerifiedAt: new Date() },
-    });
+    const record = await findValidToken(body.token, 'INVITE');
+    const invited = await prisma.user.findUniqueOrThrow({ where: { id: record.userId } });
+    // Existing accounts confirm the invitation with their current password; it is not changed.
+    if (invited.passwordHash && !(await verifyPassword(body.password, invited.passwordHash))) {
+      throw unauthorized('You already have an AuthenQ account. Enter its current password to accept the invitation.');
+    }
+    await markTokenUsed(record.id);
+    const user = invited.passwordHash
+      ? await prisma.user.update({ where: { id: invited.id }, data: { emailVerifiedAt: invited.emailVerifiedAt ?? new Date() } })
+      : await prisma.user.update({
+          where: { id: invited.id },
+          data: { name: body.name, passwordHash: await hashPassword(body.password), emailVerifiedAt: new Date() },
+        });
     await prisma.organizationMember.updateMany({ where: { userId: user.id, status: 'INVITED' }, data: { status: 'ACTIVE' } });
     const membership = await prisma.organizationMember.findFirst({ where: { userId: user.id, status: 'ACTIVE' }, orderBy: { createdAt: 'desc' } });
     if (!membership) throw notFound('Invitation');
