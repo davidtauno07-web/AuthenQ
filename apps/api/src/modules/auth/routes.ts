@@ -12,8 +12,10 @@ import { ctxOf } from '../context.js';
 import { sendEmail } from './email.js';
 import { clearSessionCookies, createSession, CSRF_COOKIE } from './sessions.js';
 import { newTotpSecret, verifyTotp } from './totp.js';
+import { oidcRouter } from './oidc.js';
 
 export const authRouter = Router();
+authRouter.use(oidcRouter);
 
 const password = z
   .string()

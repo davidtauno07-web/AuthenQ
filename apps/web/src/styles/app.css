@@ -239,3 +239,6 @@ hr.sep { border: none; border-top: var(--line); margin: 8px 0; }
 .subnav:hover { background: var(--g100); }
 .subnav.active { background: var(--g900); color: var(--white); }
 @media (max-width: 900px) { .settings-grid { grid-template-columns: 1fr !important; } }
+.divider-text { display: flex; align-items: center; gap: 10px; }
+.divider-text::before, .divider-text::after { content: ''; flex: 1; border-top: var(--line); }
+a.btn { justify-content: center; }

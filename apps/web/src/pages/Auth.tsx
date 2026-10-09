@@ -31,6 +31,42 @@ function AuthFrame({ title, subtitle, children }: { title: string; subtitle?: st
   );
 }
 
+const SSO_ERRORS: Record<string, string> = {
+  cancelled: 'Google sign-in was cancelled.',
+  not_configured: 'Google sign-in is not configured on this server.',
+  provider_unavailable: 'Google could not be reached. Try again in a moment.',
+  provider_error: 'Google returned an error. Try again.',
+  expired: 'The sign-in attempt expired. Start again.',
+  invalid_state: 'The sign-in response could not be verified. Start again.',
+  invalid_callback: 'The sign-in response was incomplete. Start again.',
+  invalid_token: 'The identity token from Google could not be verified.',
+  email_unverified: 'Your Google account email is not verified.',
+  domain_not_allowed: 'This Google account domain is not allowed for this AuthenQ server.',
+  no_account: 'No AuthenQ account exists for this Google account. Ask your administrator for an invitation, accept it, then sign in with Google.',
+  no_membership: 'Your account is not an active member of any organization. Accept your invitation first.',
+  locked: 'Your account is temporarily locked. Try again later or reset your password.',
+  mfa_required: 'Your account uses an authenticator app. Sign in with your email, password and authenticator code.',
+};
+
+interface Providers { google: { configured: boolean; setup?: string } }
+
+function GoogleSignIn({ next }: { next: string }) {
+  const [p, setP] = useState<Providers | null>(null);
+  useEffect(() => {
+    api.get<Providers>('/auth/providers').then(setP).catch(() => setP({ google: { configured: false, setup: 'Sign-in providers could not be loaded.' } }));
+  }, []);
+  if (!p) return null;
+  if (!p.google.configured) {
+    return (
+      <div className="stack sm">
+        <button type="button" disabled aria-describedby="google-setup">Continue with Google</button>
+        <p id="google-setup" className="small muted">Setup required: {p.google.setup}</p>
+      </div>
+    );
+  }
+  return <a className="btn" href={`/api/v1/auth/google/start?next=${encodeURIComponent(next)}`}>Continue with Google</a>;
+}
+
 export function Login() {
   const { me, setMe } = useAuth();
   const nav = useNavigate();
@@ -64,7 +100,10 @@ export function Login() {
   return (
     <AuthFrame title="Sign in" subtitle="Use your work email and password.">
       <form className="stack" onSubmit={submit}>
+        {params.get('sso_error') ? <div className="callout" role="alert">{SSO_ERRORS[params.get('sso_error')!] ?? 'Google sign-in failed.'}</div> : null}
         <ErrorBox error={error} title="Sign-in failed" />
+        <GoogleSignIn next={next} />
+        <div className="divider-text small muted"><span>or use email</span></div>
         <Field label="Email">
           <input type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} />
         </Field>
@@ -81,7 +120,6 @@ export function Login() {
           <Link to="/forgot-password">Forgot password?</Link>
           <Link to="/register">Create an organization</Link>
         </div>
-        <p className="small muted">Single sign-on: enter your email and your administrator&apos;s SSO settings are discovered automatically when configured.</p>
       </form>
     </AuthFrame>
   );

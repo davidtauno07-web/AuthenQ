@@ -32,3 +32,16 @@ Admins manage these in **Settings → Feature flags & policies**:
 - `engine.external_ai` (beta, off by default) — allow engine runs through an external AI provider.
 - `canary.api_scan` — allow API keys with the `canary.scan` scope to submit text for scanning.
 - Policies: `retention.days`, `export.requireOverrideApproval`, `workspace.shortcuts`, `security.sessionHours`, `security.requireMfa`.
+
+## Google sign-in (OIDC)
+
+| Variable | Purpose |
+| --- | --- |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | OAuth client from Google Cloud Console (type *Web application*). Server-only; never sent to the browser. Both blank = Google sign-in disabled and the login page shows *Setup required*. |
+| `GOOGLE_OIDC_ISSUER` | Defaults to `https://accounts.google.com`. Discovery, JWKS and token endpoints are read from `<issuer>/.well-known/openid-configuration`. |
+| `GOOGLE_ALLOWED_DOMAINS` | Optional comma-separated email domains allowed to sign in with Google. |
+| `API_PUBLIC_URL` | Optional public origin that serves `/api/v1`; defaults to `APP_URL` (the Vite dev server proxies `/api`). |
+
+Authorized redirect URI to register: `<API_PUBLIC_URL or APP_URL>/api/v1/auth/google/callback` (locally `http://localhost:5173/api/v1/auth/google/callback`).
+
+Account rules: Google sign-in only signs in an **existing** AuthenQ user whose Google email is verified and who has an active organization membership (for example after accepting an invitation). It never creates accounts or organizations and never changes roles. The first successful sign-in links the Google subject to the user (`user_identities`); later sign-ins match by subject. Accounts with an authenticator app (MFA) must use email, password and code.

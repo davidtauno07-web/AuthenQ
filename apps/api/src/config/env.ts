@@ -31,6 +31,11 @@ const schema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
   ANTHROPIC_API_KEY: z.string().optional(),
+  GOOGLE_CLIENT_ID: z.string().optional(),
+  GOOGLE_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_OIDC_ISSUER: z.string().url().default('https://accounts.google.com'),
+  GOOGLE_ALLOWED_DOMAINS: z.string().default(''),
+  API_PUBLIC_URL: z.string().url().optional(),
   DEMO_PASSWORD: z.string().default('AuthenQ!Demo2026'),
   OUTBOUND_BLOCK_PRIVATE: z
     .enum(['true', 'false'])

@@ -49,8 +49,25 @@ model User {
   sessions    Session[]
   authTokens  AuthToken[]
   mfaFactors  MfaFactor[]
+  identities  UserIdentity[]
 
   @@map("users")
+}
+
+/// External identity-provider links (Google OIDC). Matched by provider subject, never by user-supplied ids.
+model UserIdentity {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  provider   String
+  subject    String
+  email      String
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, subject])
+  @@index([userId])
+  @@map("user_identities")
 }
 
 model Role {

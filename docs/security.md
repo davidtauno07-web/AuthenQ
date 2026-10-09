@@ -38,3 +38,11 @@ zod validation on every route, JSON body size limit, upload size and extension a
 ## Tests
 
 `apps/api/tests/security.test.ts` covers tenant isolation/IDOR, authentication, lockout, CSRF, RBAC, malformed JSON, prototype pollution, SQL-injection-shaped input, upload rejection, API key hashing, webhook/AI secret handling, signed-link tampering and audit immutability. `apps/api/tests/domain.test.ts` covers the real-data-to-AI block and Twin leak prevention.
+
+## Google OIDC
+
+- Authorization code flow handled entirely on the server (`apps/api/src/modules/auth/oidc.ts`) with PKCE (S256), random `state` and `nonce`. These are kept in an encrypted, HTTP-only, 10-minute cookie scoped to `/api/v1/auth/google` and consumed on the first callback, so replays fail.
+- The ID token is verified against the provider JWKS (signature, `iss`, `aud`, `exp`, `nonce`) and requires `email_verified`.
+- Role and tenant come only from existing memberships; query parameters are ignored. The post-login redirect only accepts same-site relative paths.
+- Cancellation, invalid or expired callbacks, provider failures and unknown accounts redirect to `/login?sso_error=<code>` with a readable message. Failures are recorded in login events without tokens.
+- Tested against a local mock OIDC provider (`apps/api/tests/oidc.test.ts`). Real Google has not been verified until credentials are configured.
