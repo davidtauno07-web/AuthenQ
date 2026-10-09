@@ -6,6 +6,7 @@ import { ApiError } from './lib/api';
 import { AuthProvider } from './lib/auth';
 import { ToastProvider } from './lib/toast';
 import { App } from './App';
+import '@fontsource-variable/inter';
 import './styles/app.css';
 
 const queryClient = new QueryClient({

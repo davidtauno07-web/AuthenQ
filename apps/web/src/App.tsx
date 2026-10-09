@@ -13,6 +13,7 @@ import { Engine, Exports, Gold, Quality, Review } from './pages/ProjectPages';
 import { Activity, Jobs, Notifications } from './pages/Activity';
 import { Settings } from './pages/Settings';
 import { Help } from './pages/Help';
+import { ModuleHub } from './pages/ModuleHub';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const { me, loading } = useAuth();
@@ -21,6 +22,21 @@ function RequireAuth({ children }: { children: JSX.Element }) {
   if (!me) return <Navigate to={`/login?next=${encodeURIComponent(loc.pathname + loc.search)}`} replace />;
   return children;
 }
+
+function RequirePerm({ perm, children }: { perm: string; children: JSX.Element }) {
+  const { can } = useAuth();
+  if (!can(perm)) {
+    return (
+      <div className="empty" role="alert">
+        <h3>You do not have access to this area</h3>
+        <p>Your role does not include the permission required for this page. Ask an administrator if you need access.</p>
+      </div>
+    );
+  }
+  return children;
+}
+
+const guard = (perm: string, el: JSX.Element) => <RequirePerm perm={perm}>{el}</RequirePerm>;
 
 export function App() {
   return (
@@ -33,15 +49,19 @@ export function App() {
       <Route path="/accept-invite" element={<AcceptInvite />} />
       <Route element={<RequireAuth><Layout /></RequireAuth>}>
         <Route index element={<Dashboard />} />
-        <Route path="sources" element={<Sources />} />
-        <Route path="sources/:id" element={<SourceDetail />} />
-        <Route path="synthetic" element={<SyntheticSets />} />
-        <Route path="synthetic/:id" element={<SyntheticDetail />} />
-        <Route path="canary" element={<Canary />} />
-        <Route path="canary/values/:id" element={<CanaryValue />} />
-        <Route path="projects" element={<Projects />} />
-        <Route path="projects/new" element={<NewProject />} />
-        <Route path="projects/:projectId" element={<ProjectLayout />}>
+        <Route path="sources" element={guard('sources.read', <Sources />)} />
+        <Route path="sources/:id" element={guard('sources.read', <SourceDetail />)} />
+        <Route path="synthetic" element={guard('synthetic.read', <SyntheticSets />)} />
+        <Route path="synthetic/:id" element={guard('synthetic.read', <SyntheticDetail />)} />
+        <Route path="canary" element={guard('canary.read', <Canary />)} />
+        <Route path="canary/values/:id" element={guard('canary.read', <CanaryValue />)} />
+        <Route path="projects" element={guard('labeling.read', <Projects />)} />
+        <Route path="workspace" element={guard('labeling.label', <ModuleHub module="workspace" />)} />
+        <Route path="gold" element={guard('quality.read', <ModuleHub module="gold" />)} />
+        <Route path="quality" element={guard('quality.read', <ModuleHub module="quality" />)} />
+        <Route path="exports" element={guard('exports.read', <ModuleHub module="exports" />)} />
+        <Route path="projects/new" element={guard('labeling.manage', <NewProject />)} />
+        <Route path="projects/:projectId" element={guard('labeling.read', <ProjectLayout />)}>
           <Route index element={<ProjectOverview />} />
           <Route path="guidelines" element={<ProjectGuidelines />} />
           <Route path="workspace" element={<Workspace />} />
@@ -51,7 +71,7 @@ export function App() {
           <Route path="quality" element={<Quality />} />
           <Route path="exports" element={<Exports />} />
         </Route>
-        <Route path="activity" element={<Activity />} />
+        <Route path="activity" element={guard('activity.read', <Activity />)} />
         <Route path="jobs" element={<Jobs />} />
         <Route path="notifications" element={<Notifications />} />
         <Route path="settings/*" element={<Settings />} />

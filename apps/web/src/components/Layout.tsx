@@ -4,38 +4,37 @@ import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useApi } from '../lib/hooks';
 import { ago } from '../lib/format';
+import {
+  Activity, Award, Bell, Database, FolderKanban, Layers, LayoutDashboard, ListChecks, Menu, PackageOpen, PanelLeftClose, PanelLeftOpen, PenLine, Radar, Search, Settings, ShieldCheck, type LucideIcon,
+} from 'lucide-react';
 
 interface NavItem {
   to: string;
   label: string;
-  glyph: string;
+  icon: LucideIcon;
   perm?: string;
   end?: boolean;
 }
-const NAV: { section: string; items: NavItem[] }[] = [
-  { section: 'Overview', items: [{ to: '/', label: 'Dashboard', glyph: '◼', end: true }] },
+export const NAV: { section: string; items: NavItem[] }[] = [
   {
-    section: 'Pipeline',
+    section: 'Workspace',
     items: [
-      { to: '/sources', label: 'Data Sources', glyph: '01', perm: 'sources.read' },
-      { to: '/synthetic', label: 'Synthetic Sets', glyph: '02', perm: 'synthetic.read' },
-      { to: '/canary', label: 'Canary', glyph: '03', perm: 'canary.read' },
-      { to: '/projects', label: 'Labeling Projects', glyph: '04', perm: 'labeling.read' },
+      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+      { to: '/sources', label: 'Data Sources', icon: Database, perm: 'sources.read' },
+      { to: '/synthetic', label: 'Synthetic Sets', icon: Layers, perm: 'synthetic.read' },
+      { to: '/canary', label: 'Canary', icon: Radar, perm: 'canary.read' },
+      { to: '/projects', label: 'Labeling Projects', icon: FolderKanban, perm: 'labeling.read' },
+      { to: '/workspace', label: 'Labeling Workspace', icon: PenLine, perm: 'labeling.label' },
+      { to: '/gold', label: 'Gold Set', icon: Award, perm: 'quality.read' },
+      { to: '/quality', label: 'Review and Quality', icon: ShieldCheck, perm: 'quality.read' },
+      { to: '/exports', label: 'Export', icon: PackageOpen, perm: 'exports.read' },
     ],
   },
   {
-    section: 'Operations',
+    section: 'Administration',
     items: [
-      { to: '/activity', label: 'Activity', glyph: '≡', perm: 'activity.read' },
-      { to: '/jobs', label: 'Jobs', glyph: '⟳' },
-      { to: '/notifications', label: 'Notifications', glyph: '•' },
-    ],
-  },
-  {
-    section: 'Platform',
-    items: [
-      { to: '/settings', label: 'Settings', glyph: '⚙' },
-      { to: '/help', label: 'Help & docs', glyph: '?' },
+      { to: '/activity', label: 'Activity', icon: Activity, perm: 'activity.read' },
+      { to: '/settings', label: 'Settings', icon: Settings },
     ],
   },
 ];
@@ -131,7 +130,7 @@ function NotificationBell() {
   return (
     <div className="relative">
       <button className="ghost" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label={`Notifications, ${q.data?.unread ?? 0} unread`}>
-        Notifications{q.data?.unread ? <span className="badge solid">{q.data.unread}</span> : null}
+        <Bell size={18} aria-hidden />{q.data?.unread ? <span className="badge solid">{q.data.unread}</span> : null}
       </button>
       {open ? (
         <div className="menu" role="menu">
@@ -162,6 +161,14 @@ function NotificationBell() {
   );
 }
 
+function pageTitle(pathname: string) {
+  for (const s of NAV) for (const i of s.items) if (i.to !== '/' && pathname.startsWith(i.to)) return i.label;
+  if (pathname.startsWith('/jobs')) return 'Jobs';
+  if (pathname.startsWith('/notifications')) return 'Notifications';
+  if (pathname.startsWith('/help')) return 'Help';
+  return pathname === '/' ? 'Dashboard' : '';
+}
+
 export function Layout() {
   const { me, can, logout, setMe } = useAuth();
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('aq.sidebar') === 'collapsed');
@@ -170,16 +177,25 @@ export function Layout() {
   const [userMenu, setUserMenu] = useState(false);
   const loc = useLocation();
   const nav = useNavigate();
-  useEffect(() => setMobile(false), [loc.pathname]);
+  useEffect(() => {
+    setMobile(false);
+    setUserMenu(false);
+  }, [loc.pathname]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPalette((p) => !p);
       }
+      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
+        e.preventDefault();
+        toggle();
+      }
+      if (e.key === 'Escape') setMobile(false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const toggle = () => {
     setCollapsed((c) => {
@@ -187,23 +203,30 @@ export function Layout() {
       return !c;
     });
   };
+  const initials = (me?.user.name ?? '?').split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
   return (
     <div className={`shell ${collapsed ? 'collapsed' : ''} ${mobile ? 'mobile-open' : ''}`}>
       <a href="#main" className="sr-only">Skip to content</a>
+      {mobile ? <div className="scrim" onClick={() => setMobile(false)} aria-hidden /> : null}
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
-          <img src="/authenq-logo-white.png" alt="AuthenQ" />
+          <Link to="/" aria-label="AuthenQ home">
+            {collapsed ? <img src="/favicon.png" alt="AuthenQ" className="mark-img" /> : <img src="/authenq-logo.png" alt="AuthenQ" />}
+          </Link>
+          <button className="ghost icon collapse-btn" onClick={toggle} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={collapsed ? 'Expand sidebar (Ctrl+\\)' : 'Collapse sidebar (Ctrl+\\)'}>
+            {collapsed ? <PanelLeftOpen size={18} aria-hidden /> : <PanelLeftClose size={18} aria-hidden />}
+          </button>
         </div>
         <nav>
           {NAV.map((s) => {
             const items = s.items.filter((i) => !i.perm || can(i.perm));
             if (!items.length) return null;
             return (
-              <div key={s.section}>
+              <div key={s.section} className="nav-group">
                 <div className="section">{s.section}</div>
                 {items.map((i) => (
-                  <NavLink key={i.to} to={i.to} end={i.end} className={({ isActive }) => `nav ${isActive ? 'active' : ''}`} title={collapsed ? i.label : undefined}>
-                    <span className="glyph" aria-hidden>{i.glyph}</span>
+                  <NavLink key={i.to} to={i.to} end={i.end} className={({ isActive }) => `nav ${isActive ? 'active' : ''}`} aria-label={collapsed ? i.label : undefined} data-tip={collapsed ? i.label : undefined}>
+                    <i.icon size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
                     <span className="label">{i.label}</span>
                   </NavLink>
                 ))}
@@ -212,32 +235,36 @@ export function Layout() {
           })}
         </nav>
         <div className="foot">
-          <button className="sm" onClick={toggle} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
-            {collapsed ? '»' : '« Collapse'}
-          </button>
+          <NavLink to="/jobs" className={({ isActive }) => `nav ${isActive ? 'active' : ''}`} aria-label={collapsed ? 'Jobs' : undefined} data-tip={collapsed ? 'Jobs' : undefined}>
+            <ListChecks size={18} strokeWidth={1.75} aria-hidden className="nav-icon" />
+            <span className="label">Jobs</span>
+          </NavLink>
         </div>
       </aside>
       <div className="main">
         <header className="topbar">
-          <button className="ghost sm mobile-only" onClick={() => setMobile((m) => !m)} aria-label="Open navigation" style={{ display: 'none' }}>
-            Menu
+          <button className="ghost icon mobile-only" onClick={() => setMobile((m) => !m)} aria-label="Open navigation" aria-expanded={mobile}>
+            <Menu size={18} aria-hidden />
           </button>
-          <button className="ghost" onClick={() => setPalette(true)} style={{ color: 'var(--g500)', minWidth: 260, justifyContent: 'space-between', border: '1px solid var(--g200)' }} aria-label="Open command palette">
-            <span>Search or jump to…</span>
+          <div className="topbar-title">{pageTitle(loc.pathname)}</div>
+          <span className="right" />
+          <button className="ghost search-trigger" onClick={() => setPalette(true)} aria-label="Open command palette">
+            <Search size={16} aria-hidden />
+            <span className="label">Search</span>
             <kbd>Ctrl K</kbd>
           </button>
-          <span className="right" />
           <NotificationBell />
           <div className="relative">
-            <button className="ghost" onClick={() => setUserMenu((o) => !o)} aria-expanded={userMenu}>
-              <span>{me?.user.name}</span>
-              <span className="badge soft">{me?.role.name}</span>
+            <button className="ghost account-btn" onClick={() => setUserMenu((o) => !o)} aria-expanded={userMenu} aria-haspopup="menu" aria-label="Account menu">
+              <span className="avatar" aria-hidden>{initials}</span>
+              <span className="label">{me?.user.name}</span>
             </button>
             {userMenu ? (
               <div className="menu" role="menu" style={{ padding: 6 }}>
                 <div style={{ padding: '6px 8px' }}>
-                  <div><strong>{me?.org.name}</strong></div>
+                  <div><strong>{me?.user.name}</strong></div>
                   <div className="small muted">{me?.user.email}</div>
+                  <div className="small muted">{me?.org.name} · {me?.role.name}</div>
                 </div>
                 {me && me.organizations.length > 1 ? (
                   <div style={{ padding: '6px 8px' }}>
@@ -259,23 +286,24 @@ export function Layout() {
                   </div>
                 ) : null}
                 <hr className="sep" />
-                <button className="ghost" style={{ width: '100%', justifyContent: 'flex-start' }} onClick={() => { setUserMenu(false); nav('/settings/account'); }}>
-                  Account & security
-                </button>
-                <button className="ghost" style={{ width: '100%', justifyContent: 'flex-start' }} onClick={async () => { await logout(); nav('/login'); }}>
-                  Sign out
-                </button>
+                <button role="menuitem" className="ghost menu-item" onClick={() => nav('/settings/account')}>Account and security</button>
+                <button role="menuitem" className="ghost menu-item" onClick={() => nav('/notifications')}>Notifications</button>
+                <button role="menuitem" className="ghost menu-item" onClick={() => nav('/help')}>Help and documentation</button>
+                <hr className="sep" />
+                <button role="menuitem" className="ghost menu-item" onClick={async () => { await logout(); nav('/login'); }}>Sign out</button>
               </div>
             ) : null}
           </div>
         </header>
         {me && !me.user.emailVerified ? (
-          <div className="callout" style={{ margin: '12px 28px 0' }}>
+          <div className="callout" style={{ margin: '12px 32px 0' }}>
             Your email address is not verified yet. <button className="sm" onClick={() => api.post('/auth/resend-verification')}>Resend verification email</button>
           </div>
         ) : null}
         <main id="main" className="content" tabIndex={-1}>
-          <Outlet />
+          <div className="content-inner">
+            <Outlet />
+          </div>
         </main>
       </div>
       {palette ? <CommandPalette onClose={() => setPalette(false)} /> : null}

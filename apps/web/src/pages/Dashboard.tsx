@@ -32,27 +32,27 @@ export function Dashboard() {
       <PageHead title={`${me?.org.name}`} description="Status of every stage in the pipeline, computed from your organization's data." />
       <div className="steps" aria-label="Pipeline">
         <Link to="/sources">
-          <span className="n">01 FIREWALL</span>
+          <span className="n">FIREWALL</span>
           <span className="v">{num(p.firewall.total)}</span>
           <span className="small muted">{num(p.firewall.byStatus.SIGNED_OFF ?? 0)} signed off · {num(p.firewall.byStatus.NEEDS_REVIEW ?? 0)} need review</span>
         </Link>
         <Link to="/synthetic">
-          <span className="n">02 TWIN</span>
+          <span className="n">TWIN</span>
           <span className="v">{num(p.twin.total)}</span>
           <span className="small muted">{num(p.twin.byStatus.READY ?? 0)} ready · {num(p.twin.byStatus.SAFETY_HOLD ?? 0)} on safety hold</span>
         </Link>
         <Link to="/canary">
-          <span className="n">03 CANARY</span>
+          <span className="n">CANARY</span>
           <span className="v">{num(p.canary.registered)}</span>
           <span className="small muted">values traced · {num(p.canary.openAlerts)} open alerts</span>
         </Link>
         <Link to="/projects">
-          <span className="n">04 LABELING</span>
+          <span className="n">LABELING</span>
           <span className="v">{num(tasksDone)}<span className="small muted"> / {num(tasksTotal)}</span></span>
           <span className="small muted">{num(p.labeling.pendingReview)} awaiting review</span>
         </Link>
         <Link to="/projects">
-          <span className="n">05 EXPORT</span>
+          <span className="n">EXPORT</span>
           <span className="v">{num(p.exports.completed)}</span>
           <span className="small muted">completed packages</span>
         </Link>
