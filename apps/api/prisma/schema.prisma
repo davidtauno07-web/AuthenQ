@@ -691,6 +691,14 @@ model SourceColumn {
   generalization Json?
   decidedById    String?   @db.Uuid
   decidedAt      DateTime?
+  /// What the classifier said, kept separately from any human correction.
+  systemClassification String?
+  needsReview          Boolean   @default(false)
+  /// PENDING | APPROVED | CHANGED | REJECTED — review of the classification itself (separate from the transformation decision).
+  reviewStatus         String    @default("PENDING")
+  reviewReason         String?
+  reviewedById         String?   @db.Uuid
+  reviewedAt           DateTime?
 
   source    DataSource          @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   table     SourceTable         @relation(fields: [tableId], references: [id], onDelete: Cascade)

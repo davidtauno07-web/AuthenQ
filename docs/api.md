@@ -11,7 +11,7 @@ Base path: `/api/v1`. JSON in and out. Errors use `{ "error": { "code", "message
 
 | Area | Endpoints |
 | --- | --- |
-| Firewall | `GET/POST /sources`, `GET/DELETE /sources/:id`, `POST /sources/:id/upload`, `POST /sources/:id/scan`, `PATCH /columns/:id/decision`, `POST /sources/:id/sign-off` |
+| Firewall | `GET/POST /sources`, `GET/DELETE /sources/:id`, `POST /sources/:id/upload`, `POST /sources/:id/scan`, `PATCH /columns/:id/classification`, `POST /sources/:id/classifications/approve`, `PATCH /columns/:id/decision`, `POST /sources/:id/sign-off` |
 | Twin | `POST /sources/:id/synthetic-sets`, `GET /synthetic-sets`, `GET /synthetic-sets/:id`, `GET /synthetic-sets/:id/rows`, `POST /send-to-labeling` |
 | Canary | `GET /canary/overview`, `GET /canary/registry`, `GET /canary/registry/:id`, `GET /canary/sends`, `GET/PATCH /canary/alerts`, `POST /canary/scan`, `POST /canary/scan-export/:id` |
 | Labeling | `/projects`, `/projects/:id/{guidelines,examples,tasks,labels,views,gold,engine,trials,review,quality,exports}` |

@@ -99,6 +99,10 @@ async function main() {
       await firewall.decideColumn(eng, c.id, { decision, reason: c.name === 'legacy_category' ? 'Historic outcome field; kept so it can be carried over as an engine hint.' : 'Reviewed: accepted the Firewall suggestion.' });
     }
   }
+  await firewall.approveClassifications(eng, source.id, { includeUncertain: true, reason: 'Demo data: every classification was reviewed against the column profile.' });
+  for (const c of await prisma.sourceColumn.findMany({ where: { sourceId: source.id, classification: 'NEEDS_DECISION' } })) {
+    await firewall.reviewClassification(eng, c.id, { action: 'CHANGE', classification: c.decision === 'KEEP' ? 'NON_SENSITIVE' : 'SENSITIVE', reason: 'Demo data: reviewed and confirmed.' });
+  }
   const rels = await prisma.sourceRelation.findMany({ where: { sourceId: source.id } });
   for (const r of rels) await firewall.confirmRelation(eng, r.id, true);
   await firewall.signOff(admin, source.id);

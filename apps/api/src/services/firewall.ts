@@ -4,7 +4,7 @@ import { prisma, Prisma } from '../lib/prisma.js';
 import { sha256 } from '../lib/crypto.js';
 import { badRequest, gateBlocked, notFound } from '../lib/errors.js';
 import { storage, storageKey } from '../lib/storage.js';
-import { CLASSIFIER_VERSION, classifyColumn, guessPrimaryKey, inferRelations, inferType } from '../domain/firewall.js';
+import { CLASSIFIER_VERSION, applyCombinationRisk, classifyColumn, guessPrimaryKey, inferRelations, inferType, type ColumnFinding } from '../domain/firewall.js';
 import { audit } from '../modules/audit.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue, type JobReporter } from '../modules/jobs/queue.js';
@@ -156,13 +156,22 @@ export async function getSourceDetail(ctx: RequestContext, id: string) {
     take: 100,
     include: { column: { select: { name: true, table: { select: { name: true } } } } },
   });
-  return { ...source, gate: firewallGate(source), decisions };
+  const findings = source.currentScanId
+    ? await prisma.firewallFinding.findMany({ where: { scanId: source.currentScanId }, select: { columnId: true, classification: true, suggestedAction: true, confidence: true, stats: true } })
+    : [];
+  const profiles = Object.fromEntries(
+    findings.map((f) => {
+      const st = (f.stats ?? {}) as Record<string, unknown>;
+      return [f.columnId, { classification: f.classification, suggestedAction: f.suggestedAction, confidence: f.confidence, evidence: (st.evidence as string[] | undefined) ?? [], limitations: (st.limitations as string[] | undefined) ?? [], profile: st.profile ?? null, patternHits: st.patternHits ?? {}, sampled: st.sampled, nullRatio: st.nullRatio, distinctRatio: st.distinctRatio, numeric: st.numeric ?? null, textEntities: st.textEntities ?? null }];
+    }),
+  );
+  return { ...source, gate: firewallGate(source), decisions, findings: profiles };
 }
 
 export function firewallGate(source: {
   status: string;
   currentScanId: string | null;
-  tables: { name: string; columns: { name: string; classification: string; decision: string | null; decisionSource: string | null; entityType?: string | null }[] }[];
+  tables: { name: string; columns: { name: string; classification: string; decision: string | null; decisionSource: string | null; entityType?: string | null; needsReview?: boolean; reviewStatus?: string }[] }[];
 }) {
   const reasons: string[] = [];
   if (!source.currentScanId) reasons.push('No Firewall scan has completed yet.');
@@ -170,6 +179,8 @@ export function firewallGate(source: {
   for (const t of source.tables) {
     for (const c of t.columns) {
       if (c.classification === 'UNSCANNED') reasons.push(`${t.name}.${c.name} has not been scanned.`);
+      else if (c.reviewStatus === 'REJECTED') reasons.push(`${t.name}.${c.name}: the classification was rejected. Set the correct classification.`);
+      else if (c.needsReview && c.reviewStatus !== 'APPROVED' && c.reviewStatus !== 'CHANGED') reasons.push(`${t.name}.${c.name} has an uncertain classification that needs review.`);
       else if (c.classification === 'NEEDS_DECISION' && c.decisionSource !== 'HUMAN') reasons.push(`${t.name}.${c.name} needs a human decision.`);
       else if (c.classification === 'SENSITIVE' && c.decision === 'KEEP') reasons.push(`${t.name}.${c.name} is sensitive but set to Keep.`);
       else if (c.classification === 'SENSITIVE' && c.decision === 'SCRUB_TEXT' && c.entityType !== undefined && c.entityType !== 'FREE_TEXT') reasons.push(`${t.name}.${c.name} is not free text, so Scrub text cannot protect it. Choose Replace, Generalize or Drop.`);
@@ -370,28 +381,48 @@ export async function runScanJob(orgId: string, payload: { scanId: string }, rep
     }
   }
 
-  const summary: Record<string, number> = { SENSITIVE: 0, NEEDS_DECISION: 0, NON_SENSITIVE: 0, OUTCOME: 0, IDENTIFIER: 0 };
+  const summary: Record<string, number> = { SENSITIVE: 0, NEEDS_DECISION: 0, NON_SENSITIVE: 0, OUTCOME: 0, IDENTIFIER: 0, NEEDS_REVIEW: 0 };
   let done = 0;
   const totalCols = tables.reduce((a, t) => a + t.columns.length, 0);
   for (const [ti, t] of tables.entries()) {
     const info = keyInfo[ti]!;
     await prisma.sourceTable.update({ where: { id: t.id }, data: { primaryKey: info.primaryKey } });
     const rows = samples.get(t.id)!;
-    for (const c of t.columns) {
+    const classified: { c: (typeof t.columns)[number]; isFk: boolean; name: string; finding: ColumnFinding }[] = t.columns.map((c) => {
       const isFk = relations.some((r) => r.fromTable === t.name && r.fromColumn === c.name);
-      const f = classifyColumn(
+      const finding = classifyColumn(
         { table: t.name, name: c.name, values: rows.map((r) => r[c.name]), totalRows: t.rowCount, isPrimaryKey: info.primaryKey === c.name, isForeignKey: isFk },
         knownNames,
       );
-      summary[f.classification] = (summary[f.classification] ?? 0) + 1;
+      return { c, isFk, name: c.name, finding };
+    });
+    applyCombinationRisk(classified);
+    for (const { c, isFk, finding: f } of classified) {
+      const humanClass = c.reviewStatus === 'CHANGED';
+      const effective = humanClass ? c.classification : f.classification;
+      summary[effective] = (summary[effective] ?? 0) + 1;
+      if (f.needsReview && !humanClass) summary.NEEDS_REVIEW = (summary.NEEDS_REVIEW ?? 0) + 1;
       await prisma.firewallFinding.create({
-        data: { scanId: scan.id, columnId: c.id, classification: f.classification, entityType: f.entityType, suggestedAction: f.suggestedAction, explanation: f.explanation, confidence: f.confidence, stats: { ...f.stats, textEntities: f.textEntities ?? null } as Prisma.InputJsonValue },
+        data: {
+          scanId: scan.id,
+          columnId: c.id,
+          classification: f.classification,
+          entityType: f.entityType,
+          suggestedAction: f.suggestedAction,
+          explanation: f.explanation,
+          confidence: f.confidence,
+          stats: { ...f.stats, textEntities: f.textEntities ?? null, evidence: f.evidence, limitations: f.limitations, needsReview: f.needsReview } as unknown as Prisma.InputJsonValue,
+        },
       });
       const human = c.decisionSource === 'HUMAN';
+      const keepApproval = c.reviewStatus === 'APPROVED' && c.systemClassification === f.classification;
       await prisma.sourceColumn.update({
         where: { id: c.id },
         data: {
-          classification: f.classification,
+          classification: effective,
+          systemClassification: f.classification,
+          needsReview: f.needsReview,
+          ...(humanClass || keepApproval ? {} : { reviewStatus: 'PENDING', reviewReason: null, reviewedById: null, reviewedAt: null }),
           entityType: f.entityType,
           explanation: f.explanation,
           confidence: f.confidence,
@@ -456,6 +487,90 @@ export async function decideColumn(ctx: RequestContext, columnId: string, input:
     return u;
   });
   return updated;
+}
+
+export const REVIEW_CLASSES = ['SENSITIVE', 'NON_SENSITIVE', 'OUTCOME', 'IDENTIFIER'] as const;
+export type ReviewInput = { action: 'APPROVE' | 'CHANGE' | 'REJECT'; classification?: (typeof REVIEW_CLASSES)[number]; reason?: string };
+
+/** Human review of the classification itself. The transformation decision is reviewed separately in decideColumn. */
+export async function reviewClassification(ctx: RequestContext, columnId: string, input: ReviewInput) {
+  const col = await prisma.sourceColumn.findFirst({ where: { id: columnId, orgId: ctx.orgId }, include: { table: true, source: true } });
+  if (!col || col.source.deletedAt) throw notFound('Column');
+  if (col.classification === 'UNSCANNED') throw badRequest('Scan the source before reviewing classifications.');
+  const reason = input.reason?.trim();
+  const label = `${col.table.name}.${col.name}`;
+  if (input.action === 'CHANGE') {
+    if (!input.classification || !REVIEW_CLASSES.includes(input.classification)) throw badRequest('Choose the correct classification.');
+    if (!reason) throw badRequest(`Give a reason for changing the classification of ${label}.`);
+    if (input.classification === 'IDENTIFIER' && !col.isPrimaryKey && !col.isForeignKey) throw badRequest('Only primary or foreign key columns can be classified as identifiers.');
+  }
+  if (input.action === 'REJECT' && !reason) throw badRequest(`Give a reason for rejecting the classification of ${label}.`);
+  if (input.action === 'APPROVE' && col.classification === 'NEEDS_DECISION') throw badRequest(`${label} has no definite classification to approve. Choose Sensitive, Non-sensitive, Outcome or Identifier instead.`);
+
+  const nextClass = input.action === 'CHANGE' ? input.classification! : col.classification;
+  const status = input.action === 'APPROVE' ? 'APPROVED' : input.action === 'CHANGE' ? 'CHANGED' : 'REJECTED';
+  let decision = col.decision;
+  if (nextClass === 'SENSITIVE' && (decision === 'KEEP' || decision === 'KEY')) decision = col.entityType === 'FREE_TEXT' ? 'SCRUB_TEXT' : 'REPLACE';
+  if (nextClass === 'IDENTIFIER') decision = 'KEY';
+  if (nextClass !== 'IDENTIFIER' && decision === 'KEY') decision = 'REPLACE';
+
+  return prisma.$transaction(async (tx) => {
+    const u = await tx.sourceColumn.update({
+      where: { id: col.id },
+      data: {
+        classification: nextClass,
+        reviewStatus: status,
+        reviewReason: reason ?? null,
+        reviewedById: ctx.userId,
+        reviewedAt: new Date(),
+        ...(decision !== col.decision ? { decision, decisionSource: 'SYSTEM' } : {}),
+      },
+    });
+    if (decision !== col.decision) {
+      await tx.firewallDecision.create({
+        data: { orgId: ctx.orgId, columnId: col.id, scanId: col.source.currentScanId, previous: col.decision, decision: decision!, source: 'SYSTEM', reason: `Adjusted after the classification changed to ${nextClass}.`, userId: ctx.userId },
+      });
+    }
+    if (col.source.signedOffScanId) await tx.dataSource.update({ where: { id: col.sourceId }, data: { status: 'NEEDS_REVIEW', signedOffScanId: null, signedOffAt: null } });
+    await audit(ctx, {
+      action: 'firewall.classification_reviewed',
+      resourceType: 'source_column',
+      resourceId: col.id,
+      summary: `${status === 'APPROVED' ? 'Approved' : status === 'CHANGED' ? 'Changed' : 'Rejected'} classification of ${label}${status === 'CHANGED' ? ` to ${nextClass}` : ''}${reason ? ` — ${reason}` : ''}`,
+      before: { classification: col.classification, reviewStatus: col.reviewStatus },
+      after: { classification: nextClass, reviewStatus: status },
+    }, tx);
+    return u;
+  });
+}
+
+/** Approves pending classifications in bulk. Uncertain ones are only included when explicitly requested with a reason. */
+export async function approveClassifications(ctx: RequestContext, sourceId: string, input: { columnIds?: string[]; includeUncertain?: boolean; reason?: string }) {
+  const source = await getSourceOrThrow(ctx, sourceId);
+  const reason = input.reason?.trim();
+  if (input.includeUncertain && !reason) throw badRequest('Give a reason for approving uncertain classifications in bulk.');
+  const where: Prisma.SourceColumnWhereInput = {
+    sourceId,
+    orgId: ctx.orgId,
+    reviewStatus: 'PENDING',
+    classification: { notIn: ['UNSCANNED', 'NEEDS_DECISION'] },
+    ...(input.includeUncertain ? {} : { needsReview: false }),
+    ...(input.columnIds?.length ? { id: { in: input.columnIds } } : {}),
+  };
+  const cols = await prisma.sourceColumn.findMany({ where, select: { id: true } });
+  if (!cols.length) return { approved: 0 };
+  await prisma.$transaction(async (tx) => {
+    await tx.sourceColumn.updateMany({ where: { id: { in: cols.map((c) => c.id) } }, data: { reviewStatus: 'APPROVED', reviewReason: reason ?? null, reviewedById: ctx.userId, reviewedAt: new Date() } });
+    if (source.signedOffScanId) await tx.dataSource.update({ where: { id: sourceId }, data: { status: 'NEEDS_REVIEW', signedOffScanId: null, signedOffAt: null } });
+    await audit(ctx, {
+      action: 'firewall.classifications_approved',
+      resourceType: 'data_source',
+      resourceId: sourceId,
+      summary: `Approved ${cols.length} classification(s)${input.includeUncertain ? ' including uncertain ones' : ''}${reason ? ` — ${reason}` : ''}`,
+      details: { count: cols.length, includeUncertain: !!input.includeUncertain },
+    }, tx);
+  });
+  return { approved: cols.length };
 }
 
 export async function confirmRelation(ctx: RequestContext, relationId: string, confirmed: boolean) {

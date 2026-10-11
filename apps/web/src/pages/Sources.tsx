@@ -95,6 +95,23 @@ interface Column {
   decisionSource: string | null;
   isPrimaryKey: boolean;
   isForeignKey: boolean;
+  needsReview: boolean;
+  reviewStatus: string;
+  reviewReason: string | null;
+  systemClassification: string | null;
+}
+interface Finding {
+  classification: string;
+  suggestedAction: string;
+  confidence: number;
+  evidence: string[];
+  limitations: string[];
+  profile: { minLength: number; maxLength: number; shapes: { shape: string; share: number }[]; prefixes: { prefix: string; share: number }[]; emailDomains: { domain: string; share: number }[]; suppressedBelow: number } | null;
+  patternHits: Record<string, number>;
+  sampled?: number;
+  nullRatio?: number;
+  distinctRatio?: number;
+  numeric?: { min: number; max: number; mean: number } | null;
 }
 interface SourceDetailRes extends SourceRow {
   currentScanId: string | null;
@@ -106,6 +123,7 @@ interface SourceDetailRes extends SourceRow {
   scans: { id: string; version: number; status: string; summary: Record<string, number> | null; createdAt: string; completedAt: string | null }[];
   sets: { id: string; name: string; version: number; status: string; rowCount: number; createdAt: string }[];
   gate: { ready: boolean; reasons: string[] };
+  findings: Record<string, Finding>;
   decisions: { id: string; previous: string | null; decision: string; source: string; reason: string | null; createdAt: string; column: { name: string; table: { name: string } } }[];
 }
 
@@ -133,11 +151,13 @@ export function SourceDetail() {
   const scan = useAction(() => api.post(`/sources/${id}/scan`), { success: 'Firewall scan started.', invalidate: inv });
   const signOff = useAction(() => api.post(`/sources/${id}/sign-off`), { success: 'Firewall decisions signed off.', invalidate: inv });
   const relation = useAction((v: { id: string; confirmed: boolean }) => api.patch(`/relations/${v.id}`, { confirmed: v.confirmed }), { invalidate: inv });
+  const approveConfident = useAction(() => api.post<{ approved: number }>(`/sources/${id}/classifications/approve`, {}), { success: 'Confident classifications approved.', invalidate: inv });
   const [uploadErr, setUploadErr] = useState<Error | null>(null);
   const [uploading, setUploading] = useState(false);
+  const pendingConfident = useMemo(() => (q.data?.tables ?? []).reduce((n, t) => n + t.columns.filter((c) => c.reviewStatus === 'PENDING' && !c.needsReview && !['UNSCANNED', 'NEEDS_DECISION'].includes(c.classification)).length, 0), [q.data]);
   const columns = useMemo(() => {
     const out: { table: string; col: Column }[] = [];
-    for (const t of q.data?.tables ?? []) for (const c of t.columns) if ((!tableFilter || t.name === tableFilter) && (!classFilter || c.classification === classFilter)) out.push({ table: t.name, col: c });
+    for (const t of q.data?.tables ?? []) for (const c of t.columns) if ((!tableFilter || t.name === tableFilter) && (!classFilter || (classFilter === 'NEEDS_REVIEW' ? needsAttention(c) : c.classification === classFilter))) out.push({ table: t.name, col: c });
     return out;
   }, [q.data, tableFilter, classFilter]);
   if (q.isLoading) return <Loading rows={8} />;
@@ -205,23 +225,30 @@ export function SourceDetail() {
               </select>
               <select aria-label="Filter by classification" value={classFilter} onChange={(e) => setClassFilter(e.target.value)} style={{ width: 180 }}>
                 <option value="">All classifications</option>
+                <option value="NEEDS_REVIEW">Needs review</option>
                 {['SENSITIVE', 'NEEDS_DECISION', 'IDENTIFIER', 'OUTCOME', 'NON_SENSITIVE', 'UNSCANNED'].map((c) => <option key={c} value={c}>{humanize(c)}</option>)}
               </select>
+              {can('firewall.decide') ? (
+                <button className="sm" disabled={approveConfident.isPending || !pendingConfident} onClick={() => approveConfident.mutate(undefined)} title="Approves pending classifications the Firewall is confident about. Uncertain ones must be reviewed one by one.">
+                  Approve {pendingConfident} confident
+                </button>
+              ) : null}
             </>
           }
         >
           <div className="table-wrap" style={{ border: 'none' }}>
             <table>
-              <thead><tr><th>Column</th><th>Type</th><th>Classification</th><th>Why</th><th>Decision</th><th /></tr></thead>
+              <thead><tr><th>Column</th><th>Type</th><th>Classification</th><th>Why</th><th>Review</th><th>Decision</th><th /></tr></thead>
               <tbody>
                 {columns.map(({ table, col }) => (
                   <tr key={col.id}>
                     <td><span className="muted small">{table}.</span><strong>{col.name}</strong>{col.isPrimaryKey ? <> <Badge tone="soft">PK</Badge></> : null}{col.isForeignKey ? <> <Badge tone="soft">FK</Badge></> : null}</td>
                     <td className="small">{col.dataType}{col.format ? <span className="muted"> · {col.format}</span> : null}</td>
                     <td><StatusBadge status={col.classification} />{col.entityType ? <div className="small muted">{humanize(col.entityType)}{col.confidence !== null ? ` · ${pct(col.confidence, 0)}` : ''}</div> : null}</td>
-                    <td className="small" style={{ maxWidth: 420 }}>{col.explanation ?? '—'}</td>
+                    <td className="small" style={{ maxWidth: 420 }}>{col.explanation ?? '—'}{s.findings?.[col.id]?.limitations?.length ? <div className="muted">{s.findings[col.id]!.limitations.length} limitation(s) noted</div> : null}</td>
+                    <td><ReviewBadge col={col} /></td>
                     <td>{col.decision ? <Badge tone={col.decisionSource === 'HUMAN' ? 'solid' : 'plain'} title={col.decisionSource === 'HUMAN' ? 'Human decision' : 'Firewall suggestion'}>{humanize(col.decision)}</Badge> : '—'}<div className="small muted">{col.decisionSource === 'HUMAN' ? 'Human' : col.decision ? 'Suggested' : ''}</div></td>
-                    <td>{can('firewall.decide') && col.classification !== 'UNSCANNED' ? <button className="sm" onClick={() => setEditing({ col, table })}>Change</button> : null}</td>
+                    <td>{can('firewall.decide') && col.classification !== 'UNSCANNED' ? <button className="sm" onClick={() => setEditing({ col, table })}>Review</button> : null}</td>
                   </tr>
                 ))}
               </tbody>
@@ -294,7 +321,7 @@ export function SourceDetail() {
       ) : null}
 
       {can('deletion.manage') ? <DeleteSource name={s.name} id={s.id} /> : null}
-      {editing ? <DecisionModal col={editing.col} table={editing.table} onClose={() => setEditing(null)} invalidate={inv} /> : null}
+      {editing ? <DecisionModal col={editing.col} table={editing.table} finding={q.data?.findings?.[editing.col.id]} onClose={() => setEditing(null)} invalidate={inv} /> : null}
       {preview ? <PreviewModal sourceId={s.id} tableId={preview} onClose={() => setPreview(null)} /> : null}
       {twinOpen ? <TwinModal source={s} onClose={() => setTwinOpen(false)} /> : null}
     </div>
@@ -321,18 +348,99 @@ function UploadPanel({ onUpload, uploading, error }: { onUpload: (f: File, table
   );
 }
 
-function DecisionModal({ col, table, onClose, invalidate }: { col: Column; table: string; onClose: () => void; invalidate: string[] }) {
+function needsAttention(c: Column) {
+  return c.reviewStatus === 'REJECTED' || (c.classification !== 'UNSCANNED' && c.reviewStatus === 'PENDING' && (c.needsReview || c.classification === 'NEEDS_DECISION'));
+}
+
+function ReviewBadge({ col }: { col: Column }) {
+  if (col.classification === 'UNSCANNED') return <span className="muted">—</span>;
+  if (col.reviewStatus === 'APPROVED') return <Badge tone="plain" title={col.reviewReason ?? undefined}>Approved</Badge>;
+  if (col.reviewStatus === 'CHANGED') return <Badge tone="solid" title={col.reviewReason ?? undefined}>Changed</Badge>;
+  if (col.reviewStatus === 'REJECTED') return <Badge tone="solid" title={col.reviewReason ?? undefined}>Rejected</Badge>;
+  return needsAttention(col) ? <Badge tone="solid" title="Uncertain classification. A person must review it before sign-off.">Needs review</Badge> : <Badge tone="soft">Pending</Badge>;
+}
+
+const REVIEW_CLASSES = ['SENSITIVE', 'NON_SENSITIVE', 'OUTCOME', 'IDENTIFIER'] as const;
+
+function ColumnProfile({ f }: { f: Finding }) {
+  const p = f.profile;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="small">
+        <strong>Sample</strong>: {f.sampled ?? '—'} values · {pct(f.nullRatio ?? 0, 0)} empty · {pct(f.distinctRatio ?? 0, 0)} unique
+        {p ? ` · length ${p.minLength}–${p.maxLength}` : ''}
+        {f.numeric ? ` · range ${num(f.numeric.min)}–${num(f.numeric.max)}, mean ${num(Math.round(f.numeric.mean * 100) / 100)}` : ''}
+      </div>
+      {p?.shapes.length ? <div className="small"><strong>Formats</strong>: {p.shapes.map((x) => <span key={x.shape}><code>{x.shape}</code> {pct(x.share, 0)} </span>)}</div> : null}
+      {p?.prefixes.length ? <div className="small"><strong>Prefixes</strong>: {p.prefixes.map((x) => <span key={x.prefix}><code>{x.prefix}</code> {pct(x.share, 0)} </span>)}</div> : null}
+      {p?.emailDomains.length ? <div className="small"><strong>Email domains</strong>: {p.emailDomains.map((x) => <span key={x.domain}><code>{x.domain}</code> {pct(x.share, 0)} </span>)}</div> : null}
+      {Object.keys(f.patternHits).length ? <div className="small"><strong>Pattern hits</strong>: {Object.entries(f.patternHits).map(([k, v]) => `${humanize(k)} ${pct(v, 0)}`).join(' · ')}</div> : null}
+      {p ? <div className="small muted">Formats use A = capital letter, a = small letter, 9 = digit. Groups seen fewer than {p.suppressedBelow} times are hidden so no single real value can be read here.</div> : null}
+    </div>
+  );
+}
+
+function DecisionModal({ col, table, finding, onClose, invalidate }: { col: Column; table: string; finding?: Finding; onClose: () => void; invalidate: string[] }) {
   const [decision, setDecision] = useState(col.decision ?? 'REPLACE');
   const [reason, setReason] = useState('');
+  const [review, setReview] = useState<'APPROVE' | 'CHANGE' | 'REJECT'>(col.classification === 'NEEDS_DECISION' ? 'CHANGE' : 'APPROVE');
+  const [newClass, setNewClass] = useState<string>(REVIEW_CLASSES.includes(col.classification as never) ? col.classification : 'SENSITIVE');
+  const [reviewReason, setReviewReason] = useState('');
   const save = useAction(() => api.patch(`/columns/${col.id}/decision`, { decision, reason: reason || undefined }), { success: 'Decision saved.', invalidate, onSuccess: onClose, silentError: true });
+  const saveReview = useAction(
+    () => api.patch(`/columns/${col.id}/classification`, { action: review, classification: review === 'CHANGE' ? newClass : undefined, reason: reviewReason || undefined }),
+    { success: 'Classification review saved.', invalidate, onSuccess: onClose, silentError: true },
+  );
   const options = DECISIONS.filter((d) => !(d === 'KEEP' && col.classification === 'SENSITIVE') && !(d === 'KEY' && !col.isPrimaryKey && !col.isForeignKey));
   const overriding = col.decisionSource === 'SYSTEM' && decision !== col.decision;
+  const reviewNeedsReason = review !== 'APPROVE';
+  const classOptions = REVIEW_CLASSES.filter((c) => c !== 'IDENTIFIER' || col.isPrimaryKey || col.isForeignKey);
   return (
-    <Modal title={`${table}.${col.name}`} onClose={onClose} footer={<><button onClick={onClose}>Cancel</button><button className="primary" disabled={save.isPending || (overriding && !reason.trim())} onClick={() => save.mutate(undefined)}>Save decision</button></>}>
+    <Modal wide title={`${table}.${col.name}`} onClose={onClose} footer={<button onClick={onClose}>Close</button>}>
       <div className="stack">
-        <div className="callout small"><strong>{humanize(col.classification)}</strong>{col.entityType ? ` · ${humanize(col.entityType)}` : ''}<div>{col.explanation}</div></div>
+        <div className="callout small">
+          <strong>{humanize(col.classification)}</strong>
+          {col.entityType ? ` · ${humanize(col.entityType)}` : ''}
+          {col.confidence !== null ? ` · ${pct(col.confidence, 0)} confidence` : ''}
+          {col.systemClassification && col.systemClassification !== col.classification ? <span className="muted"> · Firewall said {humanize(col.systemClassification)}</span> : null}
+          <div>{col.explanation}</div>
+        </div>
+        {finding ? (
+          <div className="grid cols-2">
+            <div>
+              <h4>Evidence</h4>
+              {finding.evidence.length ? <ul className="small">{finding.evidence.map((e) => <li key={e}>{e}</li>)}</ul> : <p className="small muted">No specific signals beyond the column type.</p>}
+              <h4>Limitations</h4>
+              {finding.limitations.length ? <ul className="small">{finding.limitations.map((e) => <li key={e}>{e}</li>)}</ul> : <p className="small muted">None noted.</p>}
+            </div>
+            <div>
+              <h4>Profile</h4>
+              <ColumnProfile f={finding} />
+            </div>
+          </div>
+        ) : null}
+
         <fieldset>
-          <legend>Action</legend>
+          <legend>1. Classification review</legend>
+          <div className="stack" style={{ gap: 6 }}>
+            {col.classification !== 'NEEDS_DECISION' ? (
+              <label className="check"><input type="radio" name="review" checked={review === 'APPROVE'} onChange={() => setReview('APPROVE')} /><span><strong>Approve</strong> <span className="small muted">The classification is correct.</span></span></label>
+            ) : null}
+            <label className="check"><input type="radio" name="review" checked={review === 'CHANGE'} onChange={() => setReview('CHANGE')} /><span><strong>Change</strong> <span className="small muted">Set the correct classification.</span></span></label>
+            {review === 'CHANGE' ? (
+              <select aria-label="Correct classification" value={newClass} onChange={(e) => setNewClass(e.target.value)} style={{ maxWidth: 240 }}>
+                {classOptions.map((c) => <option key={c} value={c}>{humanize(c)}</option>)}
+              </select>
+            ) : null}
+            <label className="check"><input type="radio" name="review" checked={review === 'REJECT'} onChange={() => setReview('REJECT')} /><span><strong>Reject</strong> <span className="small muted">The classification is wrong and needs investigation. Sign-off stays blocked.</span></span></label>
+            <Field label={reviewNeedsReason ? 'Reason (required)' : 'Reason (optional)'}><textarea value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} /></Field>
+            <ErrorBox error={saveReview.error} />
+            <div><button className="primary" disabled={saveReview.isPending || (reviewNeedsReason && !reviewReason.trim())} onClick={() => saveReview.mutate(undefined)}>Save review</button></div>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>2. Transformation</legend>
           <div className="stack" style={{ gap: 6 }}>
             {options.map((d) => (
               <label key={d} className="check">
@@ -340,10 +448,11 @@ function DecisionModal({ col, table, onClose, invalidate }: { col: Column; table
                 <span><strong>{humanize(d)}</strong> <span className="small muted">{DECISION_HELP[d]}</span></span>
               </label>
             ))}
+            <Field label={overriding ? 'Reason for overriding the suggestion (required)' : 'Reason (optional)'}><textarea value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+            <ErrorBox error={save.error} />
+            <div><button className="primary" disabled={save.isPending || (overriding && !reason.trim())} onClick={() => save.mutate(undefined)}>Save decision</button></div>
           </div>
         </fieldset>
-        <Field label={overriding ? 'Reason for overriding the suggestion (required)' : 'Reason (optional)'}><textarea value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
-        <ErrorBox error={save.error} />
       </div>
     </Modal>
   );

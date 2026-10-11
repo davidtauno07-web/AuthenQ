@@ -3,7 +3,7 @@
  * produces an explained classification. Pure and deterministic so scans are
  * reproducible and versionable.
  */
-export const CLASSIFIER_VERSION = 'firewall-rules-1.3';
+export const CLASSIFIER_VERSION = 'firewall-profile-2.0';
 
 export type Classification = 'SENSITIVE' | 'NEEDS_DECISION' | 'NON_SENSITIVE' | 'OUTCOME' | 'IDENTIFIER';
 export type Action = 'REPLACE' | 'GENERALIZE' | 'KEEP' | 'DROP' | 'SCRUB_TEXT' | 'KEY';
@@ -26,6 +26,17 @@ export interface ColumnStats {
   patternHits: Record<string, number>;
   topValuesHidden: boolean;
   numeric?: { min: number; max: number; mean: number };
+  profile?: ValueProfile;
+}
+
+/** Aggregate-only profile of a column. Groups with fewer than K_MIN members are suppressed so no single value can be read back. */
+export interface ValueProfile {
+  minLength: number;
+  maxLength: number;
+  shapes: { shape: string; share: number }[];
+  prefixes: { prefix: string; share: number }[];
+  emailDomains: { domain: string; share: number }[];
+  suppressedBelow: number;
 }
 
 export interface ColumnFinding {
@@ -38,6 +49,9 @@ export interface ColumnFinding {
   explanation: string;
   stats: ColumnStats;
   textEntities?: Record<string, number>;
+  evidence: string[];
+  limitations: string[];
+  needsReview: boolean;
 }
 
 export const PATTERNS: Record<string, RegExp> = {
@@ -119,7 +133,9 @@ export function detectTextEntities(text: string): Record<string, string[]> {
   return out;
 }
 
-export function classifyColumn(col: ColumnInput, knownPersonNames: Set<string> = new Set()): ColumnFinding {
+type CoreFinding = Omit<ColumnFinding, 'evidence' | 'limitations' | 'needsReview'>;
+
+function classifyCore(col: ColumnInput, knownPersonNames: Set<string>): CoreFinding {
   const raw = col.values;
   const present = raw.filter((v) => v !== null && v !== undefined && String(v).trim() !== '').map((v) => String(v).trim());
   const distinct = new Set(present).size;
@@ -304,4 +320,113 @@ export function guessPrimaryKey(table: string, columns: Record<string, string[]>
     if (vals.every(Boolean) && new Set(vals).size === vals.length) return c;
   }
   return null;
+}
+
+export const K_MIN = 5;
+const PERSON_VALUE = /^[A-Z][a-z'-]+(?: [A-Z][a-z'-]+){1,3}$/;
+const shapeOf = (v: string) => v.slice(0, 32).replace(/[A-Z]/g, 'A').replace(/[a-z]/g, 'a').replace(/\d/g, '9');
+
+function topShares(values: string[], key: (v: string) => string | null, limit = 5) {
+  const counts = new Map<string, number>();
+  for (const v of values) {
+    const k = key(v);
+    if (k) counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  return [...counts].filter(([, n]) => n >= K_MIN).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([k, n]) => [k, Math.round((n / Math.max(values.length, 1)) * 1000) / 1000] as const);
+}
+
+export function profileValues(present: string[]): ValueProfile {
+  const lens = present.map((v) => v.length);
+  const phoneLike = (v: string) => (/^\+?[\d\s().-]{7,20}$/.test(v) ? v.replace(/[^\d+]/g, '').slice(0, v.startsWith('+') ? 4 : 3) : null);
+  const idPrefix = (v: string) => /^([A-Za-z]{2,6})[-_]?\d/.exec(v)?.[1]?.toUpperCase() ?? null;
+  return {
+    minLength: lens.length ? Math.min(...lens) : 0,
+    maxLength: lens.length ? Math.max(...lens) : 0,
+    shapes: topShares(present, shapeOf).map(([shape, share]) => ({ shape, share })),
+    prefixes: topShares(present, (v) => phoneLike(v) ?? idPrefix(v)).map(([prefix, share]) => ({ prefix, share })),
+    emailDomains: topShares(present, (v) => (PATTERNS.EMAIL!.test(v) ? v.split('@')[1]!.toLowerCase() : null)).map(([domain, share]) => ({ domain, share })),
+    suppressedBelow: K_MIN,
+  };
+}
+
+const EXPECTED_SHARE: Record<string, (present: string[], stats: ColumnStats) => number> = {
+  EMAIL: (_p, s) => s.patternHits.EMAIL ?? 0,
+  PHONE: (_p, s) => s.patternHits.PHONE ?? 0,
+  PERSON_NAME: (p) => p.filter((v) => /^[A-Z][a-z'-]+(?: [A-Z][a-z'-]+){0,3}$/.test(v)).length / Math.max(p.length, 1),
+  IP_ADDRESS: (_p, s) => s.patternHits.IP_ADDRESS ?? 0,
+  POSTAL_CODE: (p) => p.filter((v) => /^[A-Z0-9][A-Z0-9 -]{2,9}$/i.test(v) && /\d/.test(v)).length / Math.max(p.length, 1),
+  DATE_OF_BIRTH: (_p, s) => (s.patternHits.DATE ?? 0) + (s.patternHits.DATETIME ?? 0),
+};
+
+/**
+ * Classifies a column from its name, its sampled values, its profile and its role in the schema.
+ * Returns evidence, limitations and whether a human must review the classification before Twin.
+ */
+export function classifyColumn(col: ColumnInput, knownPersonNames: Set<string> = new Set()): ColumnFinding {
+  let f = classifyCore(col, knownPersonNames);
+  const present = col.values.filter((v) => v !== null && v !== undefined && String(v).trim() !== '').map((v) => String(v).trim());
+  const pct = (n: number) => `${Math.round(n * 100)}%`;
+  const evidence: string[] = [];
+  const limitations: string[] = [];
+  let flagged = false;
+
+  // Value-based detection when the column name gives no hint.
+  if (f.classification === 'NON_SENSITIVE' || f.entityType === 'UNIQUE_VALUE') {
+    const phoneShare = present.filter((v) => /^\+?[\d\s().-]{8,20}$/.test(v) && /^(\+|0|\()|[\s.-]/.test(v) && v.replace(/\D/g, '').length >= 8).length / Math.max(present.length, 1);
+    const personShare = present.filter((v) => PERSON_VALUE.test(v)).length / Math.max(present.length, 1);
+    const knownShare = knownPersonNames.size ? present.filter((v) => v.split(/\s+/).some((w) => knownPersonNames.has(w))).length / Math.max(present.length, 1) : 0;
+    if (present.length >= 10 && phoneShare >= 0.8) {
+      f = { ...f, classification: 'SENSITIVE', entityType: 'PHONE', suggestedAction: 'REPLACE', confidence: 0.85, explanation: `${pct(phoneShare)} of sampled values are formatted like phone numbers, although the column name does not say so. Values will be replaced with synthetic numbers in the same format.` };
+      evidence.push(`Value format: ${pct(phoneShare)} phone-like`);
+    } else if (present.length >= 10 && personShare >= 0.7 && f.stats.distinctRatio > 0.3) {
+      const strong = knownShare >= 0.3;
+      f = { ...f, classification: strong ? 'SENSITIVE' : 'NEEDS_DECISION', entityType: 'PERSON_NAME', suggestedAction: 'REPLACE', confidence: strong ? 0.82 : 0.6, explanation: `${pct(personShare)} of sampled values look like personal names (capitalised first and last names)${strong ? ', and many share words with name columns elsewhere in this source' : ''}. The column name does not say so, so please confirm.` };
+      evidence.push(`Value format: ${pct(personShare)} look like "First Last" names`);
+      flagged = true;
+    }
+  }
+
+  // Name/value agreement for name-based classifications.
+  const check = f.entityType ? EXPECTED_SHARE[f.entityType] : undefined;
+  if (check && f.classification !== 'IDENTIFIER' && present.length >= 5) {
+    const share = check(present, f.stats);
+    if (share >= 0.8) {
+      evidence.push(`Values agree with the ${f.entityType!.toLowerCase().replace(/_/g, ' ')} format (${pct(share)})`);
+      f = { ...f, confidence: Math.min(0.98, f.confidence + 0.05) };
+    } else if (share < 0.5) {
+      limitations.push(`The name suggests ${f.entityType!.toLowerCase().replace(/_/g, ' ')}, but only ${pct(share)} of sampled values have that format. The column may hold something else.`);
+      f = { ...f, confidence: Math.min(f.confidence, 0.6) };
+      flagged = true;
+    }
+  }
+
+  for (const [k, v] of Object.entries(f.stats.patternHits)) if (v >= 0.2 && !evidence.some((e) => e.includes(k.toLowerCase()))) evidence.push(`${pct(v)} of values match the ${k.toLowerCase().replace(/_/g, ' ')} pattern`);
+  if (NAME_HINTS.some(([re]) => re.test(col.name)) || TEXT_HINTS.test(col.name) || OUTCOME_HINTS.test(col.name)) evidence.push(`Column name "${col.name}" matches a known naming pattern`);
+  if (f.stats.distinctRatio > 0.95 && present.length > 20) evidence.push(`${pct(f.stats.distinctRatio)} of values are unique`);
+  if (f.textEntities && Object.keys(f.textEntities).length) evidence.push(`Entities found inside the text: ${Object.entries(f.textEntities).map(([k, n]) => `${n} ${k.toLowerCase().replace(/_/g, ' ')}`).join(', ')}`);
+  if (col.isPrimaryKey) evidence.push('Unique across all rows (primary key)');
+  if (col.isForeignKey) evidence.push('Values reference another table (foreign key)');
+
+  if (present.length < 30) limitations.push(`Only ${present.length} non-empty values were sampled, so the classification is less certain.`);
+  if (f.stats.nullRatio > 0.5) limitations.push(`${pct(f.stats.nullRatio)} of sampled values are empty.`);
+  if (col.totalRows > f.stats.sampled) limitations.push(`Based on a sample of ${f.stats.sampled} of ${col.totalRows} rows. Rare values outside the sample were not inspected.`);
+  if (f.entityType === 'FREE_TEXT') limitations.push('Pattern detection in free text cannot find every personal detail, such as names not seen elsewhere or indirect descriptions.');
+
+  const stats = { ...f.stats, profile: profileValues(present) };
+  const needsReview = flagged || f.classification === 'NEEDS_DECISION' || f.confidence < 0.8;
+  return { ...f, stats, evidence, limitations, needsReview };
+}
+
+const QUASI = new Set(['POSTAL_CODE', 'DATE_OF_BIRTH', 'CITY', 'SPECIAL_CATEGORY']);
+
+/** Marks quasi-identifiers that together can single out a person (e.g. postcode + birth date + gender). */
+export function applyCombinationRisk(columns: { name: string; finding: ColumnFinding }[]) {
+  const quasi = columns.filter((c) => c.finding.entityType && QUASI.has(c.finding.entityType));
+  if (quasi.length < 2) return;
+  for (const c of quasi) {
+    const others = quasi.filter((x) => x !== c).map((x) => x.name).join(', ');
+    c.finding.limitations.push(`Combination risk: together with ${others}, this column can re-identify individuals even if each column alone cannot.`);
+    c.finding.needsReview = true;
+    if (c.finding.classification === 'NON_SENSITIVE') c.finding.classification = 'NEEDS_DECISION';
+  }
 }

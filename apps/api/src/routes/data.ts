@@ -61,6 +61,25 @@ dataRouter.patch(
   }),
 );
 dataRouter.patch(
+  '/columns/:id/classification',
+  requirePermission('firewall.decide'),
+  asyncHandler(async (req, res) => {
+    const body = parse(
+      z.object({ action: z.enum(['APPROVE', 'CHANGE', 'REJECT']), classification: z.enum(firewall.REVIEW_CLASSES).optional(), reason: z.string().max(500).optional() }),
+      req.body,
+    );
+    res.json(await firewall.reviewClassification(ctxOf(req), param(req, 'id'), body));
+  }),
+);
+dataRouter.post(
+  '/sources/:id/classifications/approve',
+  requirePermission('firewall.decide'),
+  asyncHandler(async (req, res) => {
+    const body = parse(z.object({ columnIds: z.array(z.string().uuid()).max(5000).optional(), includeUncertain: z.boolean().optional(), reason: z.string().max(500).optional() }), req.body);
+    res.json(await firewall.approveClassifications(ctxOf(req), param(req, 'id'), body));
+  }),
+);
+dataRouter.patch(
   '/relations/:id',
   requirePermission('firewall.decide'),
   asyncHandler(async (req, res) => res.json(await firewall.confirmRelation(ctxOf(req), param(req, 'id'), parse(z.object({ confirmed: z.boolean() }), req.body).confirmed))),

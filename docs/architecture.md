@@ -5,7 +5,7 @@
 ```
              ┌────────────── Firewall boundary (real data) ──────────────┐
  upload / ─▶ │ DataSource → SourceTable/SourceColumn → SourceRow (real)  │
- connector   │ FirewallScan → FirewallFinding → FirewallDecision → sign-off│
+ connector   │ Scan → Finding → classification review → decision → sign-off│
              └───────────────────────────┬───────────────────────────────┘
                                          │ Twin (seeded generation, safety check)
                                          ▼
@@ -57,4 +57,4 @@ The queue is behind `modules/jobs/queue.ts`; moving to BullMQ/Redis later only t
 
 ## Determinism
 
-Twin generation, engine token dropout, gold sampling and audit sampling use a seeded PRNG (`lib/prng.ts`), so the same inputs and seed always produce the same output. Versions are recorded on every artifact (`firewall-rules-*`, `twin-*`, `demo-nb-*`).
+Twin generation, engine token dropout, gold sampling and audit sampling use a seeded PRNG (`lib/prng.ts`), so the same inputs and seed always produce the same output. Versions are recorded on every artifact (`firewall-profile-*`, `twin-*`, `demo-nb-*`).
