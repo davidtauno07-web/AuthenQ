@@ -1,8 +1,25 @@
 import { MongoClient } from 'mongodb';
+import { resolveSrv } from 'node:dns/promises';
 import { badRequest } from '../lib/errors.js';
+import { assertOutboundHost, blocksPrivateTargets } from '../lib/net.js';
 import { IDENT, plainRow, str, withRetry, type ConnectorConfig, type ConnectorDriver, type RemoteObject } from './types.js';
 
+/** mongodb+srv names resolve to other hosts; each SRV target is checked against the outbound policy too. */
+async function assertSrvTargets(cs: string) {
+  const m = /^mongodb\+srv:\/\/(?:[^@/]*@)?([^/?:,]+)/.exec(cs);
+  if (!m || !blocksPrivateTargets()) return;
+  let targets: { name: string }[];
+  try {
+    targets = await resolveSrv(`_mongodb._tcp.${m[1]}`);
+  } catch {
+    throw badRequest(`The SRV record for "${m[1]}" could not be resolved.`);
+  }
+  if (!targets.length) throw badRequest(`The SRV record for "${m[1]}" has no servers.`);
+  for (const t of targets) await assertOutboundHost(t.name, 'Connector hosts');
+}
+
 async function withMongo<T>(cfg: ConnectorConfig, fn: (db: ReturnType<MongoClient['db']>) => Promise<T>): Promise<T> {
+  await assertSrvTargets(str(cfg, 'connectionString'));
   const client = new MongoClient(str(cfg, 'connectionString'), { serverSelectionTimeoutMS: 10_000, connectTimeoutMS: 10_000, socketTimeoutMS: 60_000, readPreference: 'secondaryPreferred' });
   await withRetry(() => client.connect());
   try {

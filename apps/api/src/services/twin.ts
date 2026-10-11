@@ -1,12 +1,12 @@
 import { env } from '../config/env.js';
 import { prisma, Prisma } from '../lib/prisma.js';
-import { badRequest, gateBlocked, notFound } from '../lib/errors.js';
+import { badRequest, forbidden, gateBlocked, notFound } from '../lib/errors.js';
 import { normalize, signature, fuzzyKey } from '../domain/canary.js';
 import { generateTwin, TWIN_ALGORITHM_VERSION, type TwinTable } from '../domain/twin.js';
 import { learnPattern } from '../domain/patterns.js';
 import { enqueuePolicyPurge } from './retention.js';
 import { audit } from '../modules/audit.js';
-import type { RequestContext } from '../modules/context.js';
+import { can, type RequestContext } from '../modules/context.js';
 import { enqueue, type JobReporter } from '../modules/jobs/queue.js';
 import { emit, notifyRole, recordUsage } from '../modules/platform/events.js';
 
@@ -207,7 +207,8 @@ export async function getSetDetail(ctx: RequestContext, id: string) {
 }
 
 export async function listSyntheticRows(ctx: RequestContext, setId: string, tableName: string, limit: number, offset: number, q?: string) {
-  await getSetOrThrow(ctx, setId);
+  const set = await getSetOrThrow(ctx, setId);
+  if (set.approvalStatus !== 'APPROVED' && !can(ctx, 'firewall.signoff')) throw forbidden('This synthetic set has not been approved yet. Only reviewers who can approve sets can view its rows.');
   const where: Prisma.SyntheticRowWhereInput = { setId, tableName, ...(q ? { syntheticKey: { contains: q, mode: 'insensitive' } } : {}) };
   const [rows, total] = await Promise.all([
     prisma.syntheticRow.findMany({ where, orderBy: { rowIndex: 'asc' }, take: limit, skip: offset }),

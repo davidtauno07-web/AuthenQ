@@ -59,9 +59,18 @@ export async function purgeSource(ctx: RequestContext, sourceId: string, trigger
   const record = await prisma.deletionRecord.create({ data: { orgId: ctx.orgId, sourceId, trigger, requestedById: ctx.userId, limitations: LIMITATIONS } });
   const items: Item[] = [];
 
-  const rowsBefore = await prisma.sourceRow.count({ where: { sourceId } });
-  await prisma.sourceRow.deleteMany({ where: { sourceId } });
-  const rowsAfter = await prisma.sourceRow.count({ where: { sourceId } });
+  // Takes the same row lock as ingestTables: a running import finishes first, and later imports see the purge and stop.
+  const { rowsBefore, rowsAfter } = await prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT id FROM data_sources WHERE id = ${sourceId}::uuid AND "orgId" = ${ctx.orgId}::uuid FOR UPDATE`;
+      const rowsBefore = await tx.sourceRow.count({ where: { sourceId } });
+      await tx.sourceRow.deleteMany({ where: { sourceId } });
+      const rowsAfter = await tx.sourceRow.count({ where: { sourceId } });
+      await tx.dataSource.update({ where: { id: sourceId }, data: { sourcePurgedAt: new Date(), retentionUntil: null } });
+      return { rowsBefore, rowsAfter };
+    },
+    { timeout: 40 * 60_000, maxWait: 30_000 },
+  );
   items.push({ kind: 'DATABASE_ROWS', description: 'Real rows in the database', found: rowsBefore, deleted: rowsBefore - rowsAfter, remaining: rowsAfter, verified: rowsAfter === 0 });
 
   const jobs = await prisma.processingJob.findMany({ where: { orgId: ctx.orgId, resourceId: sourceId, type: 'FIREWALL_INGEST' }, select: { payload: true } });
@@ -104,7 +113,10 @@ export async function requestPurge(ctx: RequestContext, sourceId: string, input:
   if (!input.confirm) throw badRequest('Confirm that you want to delete the real data permanently from AuthenQ.');
   if (!input.reason.trim()) throw badRequest('Give a reason for deleting the real data.');
   const s = await sourceOrThrow(ctx, sourceId);
-  if (s.sourcePurgedAt) throw badRequest('Real data for this source has already been deleted.');
+  if (s.sourcePurgedAt) {
+    const last = await prisma.deletionRecord.findFirst({ where: { sourceId, orgId: ctx.orgId }, orderBy: { createdAt: 'desc' }, select: { status: true } });
+    if (last?.status !== 'PARTIAL') throw badRequest('Real data for this source has already been deleted.');
+  }
   return purgeSource(ctx, sourceId, 'MANUAL', input.reason.trim());
 }
 

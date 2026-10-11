@@ -36,6 +36,9 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('source retention an
     expect(info.purgedAt).not.toBeNull();
     expect(info.limitations.join(' ')).toMatch(/Backups/);
     await expect(retention.requestPurge(ctx, source.id, { confirm: true, reason: 'again' })).rejects.toThrow(/already/);
+    await expect(fw.uploadToSource(ctx, source.id, { originalname: 'x.csv', buffer: Buffer.from('a\n1\n'), mimetype: 'text/csv' })).rejects.toThrow(/deleted/);
+    expect(await fw.ingestTables(org.id, source.id, [{ name: 't', rows: [{ a: '1' }] }])).toEqual({ skipped: true });
+    expect(await prisma.sourceRow.count({ where: { sourceId: source.id } })).toBe(0);
     await expect(twin.createSyntheticSet(ctx, source.id, { name: 'x' } as never)).rejects.toThrow();
     expect(await prisma.activityLog.count({ where: { resourceId: source.id, action: 'source.purged' } })).toBe(1);
   });

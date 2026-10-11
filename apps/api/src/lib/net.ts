@@ -15,7 +15,7 @@ export function isPrivateAddress(ip: string): boolean {
   return false;
 }
 
-export type OutboundKind = 'Webhook URLs' | 'Connector hosts' | 'AI provider URLs';
+export type OutboundKind = 'Webhook URLs' | 'Connector hosts' | 'AI provider URLs' | 'Sign-in provider URLs';
 type Resolver = (host: string) => Promise<string[]>;
 const dnsResolve: Resolver = async (host) => (await lookup(host, { all: true, verbatim: true })).map((a) => a.address);
 

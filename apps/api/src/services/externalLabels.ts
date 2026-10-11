@@ -14,7 +14,8 @@ export const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 const ID = 'authenq_task_id';
 
 function csvCell(v: unknown): string {
-  const s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  const raw = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  const s = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
@@ -24,6 +25,8 @@ function csvCell(v: unknown): string {
  */
 export async function externalExport(ctx: RequestContext, projectId: string, input: { format: ExternalFormat; onlyUnlabeled: boolean; recipient: string }) {
   const p = await getProjectOrThrow(ctx, projectId);
+  const set = await prisma.syntheticSet.findFirst({ where: { id: p.setId, orgId: ctx.orgId, deletedAt: null }, select: { approvalStatus: true } });
+  if (set?.approvalStatus !== 'APPROVED') throw badRequest('The synthetic set behind this project is not approved, so its records cannot be sent outside AuthenQ. An administrator must approve it first.');
   const tasks = await prisma.task.findMany({
     where: { projectId, OR: [{ gold: { is: null } }, { gold: { split: { not: 'LOCKED_TEST' } } }], ...(input.onlyUnlabeled ? { status: { in: ['OPEN', 'SKIPPED', 'FLAGGED'] } } : {}) },
     orderBy: { ordinal: 'asc' },
@@ -131,7 +134,7 @@ export async function importExternalLabels(ctx: RequestContext, projectId: strin
     if (!label) return errors.push({ row, taskId, problem: `"${raw.slice(0, 60)}" is not a label in this project.` });
     if (task.gold) return errors.push({ row, taskId, problem: task.gold.split === 'LOCKED_TEST' ? 'Locked test records cannot be labeled outside AuthenQ.' : 'Gold records must be labeled in AuthenQ.' });
     const current = (task.finalLabels as { label?: string } | null)?.label;
-    const conflict = !!current && current !== label && ['LABELED', 'DONE', 'IN_REVIEW'].includes(task.status);
+    const conflict = !!current && current !== label;
     if (conflict) conflicts.push({ row, taskId, problem: `Already labeled "${current}" in AuthenQ; the file says "${label}". Flagged for a project manager.` });
     valid.push({ taskId, label, note: r.note ? String(r.note).slice(0, 1000) : undefined, conflict });
   });
@@ -142,11 +145,20 @@ export async function importExternalLabels(ctx: RequestContext, projectId: strin
   const batchId = randomUUID();
   await prisma.$transaction(
     async (tx) => {
-      for (const v of valid) {
-        const l = await tx.label.create({
-          data: { orgId: ctx.orgId, projectId, taskId: v.taskId, userId: ctx.userId, values: { label: v.label } as Prisma.InputJsonValue, source: 'EXTERNAL_IMPORT', kind: 'WORK', guidelineVersionId: p.activeGuidelineVersionId, note: `import:${batchId}${v.note ? ` ${v.note}` : ''}`.slice(0, 1000) },
+      const rowsWithIds = valid.map((v) => ({ ...v, labelId: randomUUID() }));
+      for (let i = 0; i < rowsWithIds.length; i += 5000) {
+        await tx.label.createMany({
+          data: rowsWithIds.slice(i, i + 5000).map((v) => ({ id: v.labelId, orgId: ctx.orgId, projectId, taskId: v.taskId, userId: ctx.userId, values: { label: v.label } as Prisma.InputJsonValue, source: 'EXTERNAL_IMPORT', kind: 'WORK', guidelineVersionId: p.activeGuidelineVersionId, note: `import:${batchId}${v.note ? ` ${v.note}` : ''}`.slice(0, 1000) })),
         });
-        await tx.task.update({ where: { id: v.taskId }, data: v.conflict ? { status: 'FLAGGED' } : { status: 'LABELED', finalLabels: { label: v.label }, finalSource: 'EXTERNAL_IMPORT', finalLabelId: l.id } });
+      }
+      const flagged = rowsWithIds.filter((v) => v.conflict).map((v) => v.taskId);
+      for (let i = 0; i < flagged.length; i += 5000) await tx.task.updateMany({ where: { projectId, id: { in: flagged.slice(i, i + 5000) } }, data: { status: 'FLAGGED' } });
+      const accepted = rowsWithIds.filter((v) => !v.conflict);
+      for (let i = 0; i < accepted.length; i += 5000) {
+        const c = accepted.slice(i, i + 5000);
+        await tx.$executeRaw`UPDATE tasks AS t SET status = 'LABELED', "finalLabels" = jsonb_build_object('label', v.label), "finalSource" = 'EXTERNAL_IMPORT', "finalLabelId" = v.lid, "updatedAt" = now()
+          FROM unnest(${c.map((x) => x.taskId)}::uuid[], ${c.map((x) => x.labelId)}::uuid[], ${c.map((x) => x.label)}::text[]) AS v(tid, lid, label)
+          WHERE t.id = v.tid AND t."projectId" = ${projectId}::uuid`;
       }
       await audit(ctx, { action: 'labeling.external_import', resourceType: 'label_project', resourceId: projectId, summary: `Imported ${valid.length} external label(s) from "${input.filename.slice(0, 120)}" (${conflicts.length} conflict(s), ${errors.length} rejected row(s))`, details: { batchId, errors: errors.length, conflicts: conflicts.length } }, tx);
     },

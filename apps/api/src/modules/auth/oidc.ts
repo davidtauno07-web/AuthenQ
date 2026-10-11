@@ -4,6 +4,7 @@ import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { env, isProduction } from '../../config/env.js';
 import { decryptSecret, encryptSecret } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
+import { assertOutboundUrl } from '../../lib/net.js';
 import { prisma } from '../../lib/prisma.js';
 import { asyncHandler } from '../../lib/http.js';
 import { rateLimit } from '../../middleware/rateLimit.js';
@@ -43,6 +44,16 @@ async function discover() {
   const doc = (await r.json()) as Discovery;
   if (doc.issuer.replace(/\/$/, '') !== issuer || !doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) {
     throw new Error('OIDC discovery document is invalid or its issuer does not match the configured issuer');
+  }
+  for (const u of [doc.token_endpoint, doc.jwks_uri]) {
+    let url: URL;
+    try {
+      url = new URL(u);
+    } catch {
+      throw new Error('OIDC discovery document has an invalid endpoint URL');
+    }
+    if (new URL(issuer).protocol === 'https:' && url.protocol !== 'https:') throw new Error('OIDC token and key endpoints must use https');
+    await assertOutboundUrl(u, 'Sign-in provider URLs');
   }
   const entry = { at: Date.now(), doc, jwks: createRemoteJWKSet(new URL(doc.jwks_uri), { timeoutDuration: 8000 }) };
   discoveryCache.set(issuer, entry);
@@ -138,6 +149,7 @@ oidcRouter.get('/google/callback', limiter, asyncHandler(async (req, res) => {
   let claims: JWTPayload & { email?: string; email_verified?: boolean; name?: string; hd?: string; nonce?: string };
   try {
     const d = await discover();
+    await assertOutboundUrl(d.doc.token_endpoint, 'Sign-in provider URLs');
     const tr = await fetch(d.doc.token_endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },

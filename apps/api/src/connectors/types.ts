@@ -37,6 +37,8 @@ export interface ConnectorDriver {
   list(cfg: ConnectorConfig): Promise<RemoteObject[]>;
   describe(cfg: ConnectorConfig, object: string): Promise<RemoteColumn[]>;
   readPage(cfg: ConnectorConfig, object: string, req: PageRequest): Promise<Page>;
+  /** File-based drivers: every table in the object (XLSX sheets, SQLite tables, multi-table JSON). */
+  readTables?(cfg: ConnectorConfig, object: string): Promise<{ name: string; rows: Record<string, unknown>[] }[]>;
 }
 
 export const IDENT = /^[A-Za-z_][A-Za-z0-9_$#]{0,127}$/;

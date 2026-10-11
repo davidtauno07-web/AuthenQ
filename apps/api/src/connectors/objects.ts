@@ -22,13 +22,13 @@ function checkKey(cfg: ConnectorConfig, key: string) {
 function objectDriver(meta: Omit<ConnectorDriver, 'list' | 'test' | 'describe' | 'readPage' | 'supportsIncremental' | 'category'>, store: ObjectStore): ConnectorDriver {
   const list = async (cfg: ConnectorConfig): Promise<RemoteObject[]> =>
     (await store.list(cfg)).filter((o) => OBJECT_FILE_EXT.test(o.key)).slice(0, 500).map((o) => ({ name: o.key, kind: 'file', rowEstimate: null, sizeBytes: o.size }));
-  const load = async (cfg: ConnectorConfig, key: string) => {
+  const loadAll = async (cfg: ConnectorConfig, key: string) => {
     checkKey(cfg, key);
     const buf = await withRetry(() => store.get(cfg, key));
     if (buf.length > MAX_UPLOAD_BYTES) throw badRequest(`"${key}" is larger than 50 MB.`);
-    const tables = await parseUpload(key.split('/').pop()!, buf);
-    return tables[0] ?? { name: key, rows: [] };
+    return parseUpload(key.split('/').pop()!, buf);
   };
+  const load = async (cfg: ConnectorConfig, key: string) => (await loadAll(cfg, key))[0] ?? { name: key, rows: [] };
   const page = async (cfg: ConnectorConfig, key: string, limit: number, offset: number): Promise<Page> => {
     const t = await load(cfg, key);
     const rows = t.rows.slice(offset, offset + limit);
@@ -43,6 +43,7 @@ function objectDriver(meta: Omit<ConnectorDriver, 'list' | 'test' | 'describe' |
       return { objects: await list(cfg) };
     },
     list,
+    readTables: loadAll,
     describe: async (cfg, key) => (await page(cfg, key, 1, 0)).columns,
     readPage: (cfg, key, req) => {
       if (req.incremental) throw badRequest('Incremental reads are not supported for files. Re-import the file instead.');

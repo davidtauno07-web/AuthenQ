@@ -53,6 +53,11 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('external labeling e
     const conflicted = await prisma.task.findUniqueOrThrow({ where: { id: labeled.id } });
     expect(conflicted.status).toBe('FLAGGED');
     expect((conflicted.finalLabels as { label: string }).label).toBe(current);
+    const again = await XL.importExternalLabels(ctx, project.id, { content: `authenq_task_id,label\n${labeled.id},${other}\n`, filename: 'again.csv', dryRun: false });
+    expect(again.conflicts).toHaveLength(1);
+    const still = await prisma.task.findUniqueOrThrow({ where: { id: labeled.id } });
+    expect(still.status).toBe('FLAGGED');
+    expect((still.finalLabels as { label: string }).label).toBe(current);
     await expect(XL.importExternalLabels(ctx, project.id, { content: '{bad', filename: 'x.json', dryRun: true })).rejects.toThrow(/could not be read/);
   });
 });

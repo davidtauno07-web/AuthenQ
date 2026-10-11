@@ -13,6 +13,23 @@ function incrementalColumn(req: PageRequest) {
   return req.incremental.column;
 }
 
+/**
+ * Offset paging needs a total order: the primary key when there is one, otherwise every orderable column,
+ * so rows that tie on the order are identical in content and no row is skipped or read twice.
+ */
+async function orderBy(inc: string | null, pk: () => Promise<string[]>, cols: () => Promise<RemoteColumn[]>, unorderable: RegExp, q: (c: string) => string) {
+  let keys: string[] = [];
+  try {
+    keys = await pk();
+  } catch {
+    keys = [];
+  }
+  if (!keys.length) keys = (await cols()).filter((c) => !unorderable.test(c.type)).map((c) => c.name);
+  if (!keys.length) throw badRequest('This table has no column that can be used to read it in a stable order.');
+  return [...(inc ? [inc] : []), ...keys.filter((k) => k !== inc)].map(q).join(', ');
+}
+const dq = (c: string) => `"${c.replace(/"/g, '""')}"`;
+
 // ── PostgreSQL (and Redshift, which speaks the PostgreSQL wire protocol) ──────────
 async function withPg<T>(cfg: ConnectorConfig, fn: (c: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({ connectionString: str(cfg, 'connectionString'), statement_timeout: TIMEOUT, query_timeout: TIMEOUT, connectionTimeoutMillis: 10_000 });
@@ -68,7 +85,13 @@ function pgDriver(type: 'POSTGRES' | 'REDSHIFT'): ConnectorDriver {
         const [s, t] = splitName(object, 'public');
         const inc = incrementalColumn(req);
         const where = inc ? `WHERE "${inc}" > $3` : '';
-        const order = inc ? `"${inc}"` : '1';
+        const order = await orderBy(
+          inc,
+          async () => (await c.query<{ name: string }>('SELECT a.attname AS name FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) WHERE i.indrelid = (quote_ident($1) || \'.\' || quote_ident($2))::regclass AND i.indisprimary', [s, t])).rows.map((x) => x.name),
+          async () => (await c.query<RemoteColumn>('SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position', [s, t])).rows,
+          /^(json|xml|point|line|lseg|box|path|polygon|circle|tsvector|tsquery)$/i,
+          dq,
+        );
         const params: unknown[] = [req.limit + 1, req.offset];
         if (inc) params.push(req.incremental!.after);
         const r = await c.query(`SELECT * FROM "${s}"."${t}" ${where} ORDER BY ${order} LIMIT $1 OFFSET $2`, params);
@@ -131,7 +154,14 @@ export const mysqlDriver: ConnectorDriver = {
     withMysql(cfg, async (c) => {
       const [, t] = splitName(object, '_');
       const inc = incrementalColumn(req);
-      const sql = `SELECT * FROM \`${t}\` ${inc ? `WHERE \`${inc}\` > ?` : ''} ORDER BY ${inc ? `\`${inc}\`` : '1'} LIMIT ? OFFSET ?`;
+      const order = await orderBy(
+        inc,
+        async () => ((await c.query("SELECT column_name AS name FROM information_schema.key_column_usage WHERE table_schema = DATABASE() AND table_name = ? AND constraint_name = 'PRIMARY' ORDER BY ordinal_position", [t]))[0] as { name: string }[]).map((x) => x.name),
+        async () => (await c.query('SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ORDER BY ordinal_position', [t]))[0] as RemoteColumn[],
+        /^(json|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)$/i,
+        (x) => `\`${x.replace(/`/g, '``')}\``,
+      );
+      const sql = `SELECT * FROM \`${t}\` ${inc ? `WHERE \`${inc}\` > ?` : ''} ORDER BY ${order} LIMIT ? OFFSET ?`;
       const params = inc ? [req.incremental!.after, req.limit + 1, req.offset] : [req.limit + 1, req.offset];
       const [rows, fields] = await c.query(sql, params);
       const list = rows as Record<string, unknown>[];
@@ -202,7 +232,14 @@ export const mssqlDriver: ConnectorDriver = {
       const inc = incrementalColumn(req);
       const rq = p.request().input('o', mssql.Int, req.offset).input('n', mssql.Int, req.limit + 1);
       if (inc) rq.input('after', req.incremental!.after);
-      const r = await rq.query(`SELECT * FROM [${s}].[${t}] ${inc ? `WHERE [${inc}] > @after` : ''} ORDER BY ${inc ? `[${inc}]` : '1'} OFFSET @o ROWS FETCH NEXT @n ROWS ONLY`);
+      const order = await orderBy(
+        inc,
+        async () => (await p.request().input('s', s).input('t', t).query<{ name: string }>("SELECT kcu.column_name AS name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = @s AND tc.table_name = @t ORDER BY kcu.ordinal_position")).recordset.map((x) => x.name),
+        async () => (await p.request().input('s', s).input('t', t).query<RemoteColumn>('SELECT column_name AS name, data_type AS type FROM information_schema.columns WHERE table_schema = @s AND table_name = @t ORDER BY ordinal_position')).recordset,
+        /^(text|ntext|image|xml|geography|geometry|hierarchyid|sql_variant)$/i,
+        (x) => `[${x.replace(/]/g, ']]')}]`,
+      );
+      const r = await rq.query(`SELECT * FROM [${s}].[${t}] ${inc ? `WHERE [${inc}] > @after` : ''} ORDER BY ${order} OFFSET @o ROWS FETCH NEXT @n ROWS ONLY`);
       const cols = Object.entries(r.recordset.columns ?? {}).map(([name, c]) => ({ name, type: String((c as { type?: { name?: string } }).type?.name ?? '') }));
       return { rows: r.recordset.slice(0, req.limit).map(plainRow), columns: cols, hasMore: r.recordset.length > req.limit };
     }),
@@ -260,7 +297,14 @@ export const oracleDriver: ConnectorDriver = {
       const inc = incrementalColumn(req);
       const binds: Record<string, string | number> = { o: req.offset, n: req.limit + 1 };
       if (inc) binds.after = req.incremental!.after;
-      const r = await c.execute<Record<string, unknown>>(`SELECT * FROM "${s}"."${t}" ${inc ? `WHERE "${inc}" > :after` : ''} ORDER BY ${inc ? `"${inc}"` : '1'} OFFSET :o ROWS FETCH NEXT :n ROWS ONLY`, binds, OBJ);
+      const order = await orderBy(
+        inc,
+        async () => ((await c.execute<{ NAME: string }>("SELECT cc.column_name AS NAME FROM all_constraints k JOIN all_cons_columns cc ON k.owner = cc.owner AND k.constraint_name = cc.constraint_name WHERE k.constraint_type = 'P' AND k.owner = :s AND k.table_name = :t ORDER BY cc.position", { s, t }, OBJ)).rows ?? []).map((x) => x.NAME),
+        async () => ((await c.execute<{ NAME: string; TYPE: string }>('SELECT column_name AS NAME, data_type AS TYPE FROM all_tab_columns WHERE owner = :s AND table_name = :t ORDER BY column_id', { s, t }, OBJ)).rows ?? []).map((x) => ({ name: x.NAME, type: x.TYPE })),
+        /^(CLOB|NCLOB|BLOB|BFILE|LONG|XMLTYPE|SDO_GEOMETRY)/i,
+        dq,
+      );
+      const r = await c.execute<Record<string, unknown>>(`SELECT * FROM "${s}"."${t}" ${inc ? `WHERE "${inc}" > :after` : ''} ORDER BY ${order} OFFSET :o ROWS FETCH NEXT :n ROWS ONLY`, binds, OBJ);
       const rows = r.rows ?? [];
       return { rows: rows.slice(0, req.limit).map(plainRow), columns: (r.metaData ?? []).map((m) => ({ name: m.name, type: String(m.dbTypeName ?? '') })), hasMore: rows.length > req.limit };
     }),

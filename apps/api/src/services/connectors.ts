@@ -7,7 +7,7 @@ import { enqueue } from '../modules/jobs/queue.js';
 import { isFeatureEnabled } from '../modules/platform/events.js';
 import { assertTargets, cleanConfig, describeDriver, driverFor, DRIVERS, publicConfig, secretKeys, UNVERIFIED_FLAG } from '../connectors/registry.js';
 import { redact, type ConnectorConfig, type RemoteObject } from '../connectors/types.js';
-import type { ParsedTable } from './firewall.js';
+import { PURGED_SOURCE, type ParsedTable } from './firewall.js';
 
 export const MAX_CONNECTOR_ROWS = 250_000;
 const BATCH = 5000;
@@ -108,6 +108,18 @@ export async function readConnectorTables(
   const out: ParsedTable[] = [];
   try {
     for (const object of objects) {
+      const base = object.split('/').pop()!.split('.').filter(Boolean);
+      const name = (driver.category === 'OBJECT_STORAGE' ? base.slice(0, -1).join('_') || base[0]! : base.pop()!).toLowerCase();
+      if (driver.readTables) {
+        if (opts.shouldStop && (await opts.shouldStop())) throw new Error('The import was cancelled.');
+        const tables = await driver.readTables(cfg, object);
+        for (const t of tables) {
+          const rows = t.rows.slice(0, MAX_CONNECTOR_ROWS);
+          out.push({ name: tables.length > 1 ? `${name}_${t.name}`.toLowerCase() : name, rows });
+          await opts.onProgress?.(`Read ${rows.length} rows from ${object}${tables.length > 1 ? ` (table ${t.name})` : ''}${t.rows.length > MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
+        }
+        continue;
+      }
       const rows: Record<string, unknown>[] = [];
       for (let offset = 0; offset < MAX_CONNECTOR_ROWS; offset += BATCH) {
         if (opts.shouldStop && (await opts.shouldStop())) throw new Error('The import was cancelled.');
@@ -115,8 +127,6 @@ export async function readConnectorTables(
         rows.push(...page.rows);
         if (!page.hasMore) break;
       }
-      const base = object.split('/').pop()!.split('.').filter(Boolean);
-      const name = (driver.category === 'OBJECT_STORAGE' ? base.slice(0, -1).join('_') || base[0]! : base.pop()!).toLowerCase();
       out.push({ name, rows });
       await opts.onProgress?.(`Read ${rows.length} rows from ${object}${rows.length >= MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
     }
@@ -130,6 +140,7 @@ export async function importFromConnector(ctx: RequestContext, id: string, sourc
   const { c } = await getConnector(ctx, id);
   const source = await prisma.dataSource.findFirst({ where: { id: sourceId, orgId: ctx.orgId, deletedAt: null } });
   if (!source) throw notFound('Data source');
+  if (source.sourcePurgedAt) throw badRequest(PURGED_SOURCE);
   if (!tables.length || tables.length > 50) throw badRequest('Choose between 1 and 50 tables.');
   const sync = await prisma.connectorSync.create({ data: { orgId: ctx.orgId, connectorAccountId: c.id, status: 'RUNNING' } });
   await prisma.dataSource.update({ where: { id: sourceId }, data: { status: 'INGESTING', kind: 'CONNECTOR' } });

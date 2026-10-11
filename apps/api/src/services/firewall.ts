@@ -198,8 +198,11 @@ export async function createSource(ctx: RequestContext, input: { name: string; d
   return source;
 }
 
+export const PURGED_SOURCE = 'Real data for this source was deleted under its retention policy. Create a new source to import new data.';
+
 export async function uploadToSource(ctx: RequestContext, sourceId: string, file: { originalname: string; buffer: Buffer; mimetype: string }, tableName?: string) {
   const source = await getSourceOrThrow(ctx, sourceId);
+  if (source.sourcePurgedAt) throw badRequest(PURGED_SOURCE);
   const tables = await parseUpload(file.originalname, file.buffer, tableName);
   const record = await prisma.file.create({
     data: {
@@ -247,8 +250,8 @@ export async function ingestTables(orgId: string, sourceId: string, tables: Pars
   let done = 0;
   return prisma.$transaction(
     async (tx) => {
-      const locked = await tx.$queryRaw<{ deletedAt: Date | null }[]>`SELECT "deletedAt" FROM data_sources WHERE id = ${sourceId}::uuid AND "orgId" = ${orgId}::uuid FOR UPDATE`;
-      if (!locked.length || locked[0]!.deletedAt) return { skipped: true as const };
+      const locked = await tx.$queryRaw<{ deletedAt: Date | null; sourcePurgedAt: Date | null }[]>`SELECT "deletedAt", "sourcePurgedAt" FROM data_sources WHERE id = ${sourceId}::uuid AND "orgId" = ${orgId}::uuid FOR UPDATE`;
+      if (!locked.length || locked[0]!.deletedAt || locked[0]!.sourcePurgedAt) return { skipped: true as const };
       const existingCount = await tx.sourceTable.count({ where: { sourceId } });
       for (const [i, t] of tables.entries()) {
         const existing = await tx.sourceTable.findUnique({ where: { sourceId_name: { sourceId, name: t.name } } });
