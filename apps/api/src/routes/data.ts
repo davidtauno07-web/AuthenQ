@@ -1,3 +1,4 @@
+import * as retention from '../services/retention.js';
 import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
@@ -104,6 +105,17 @@ dataRouter.post(
     );
     res.status(202).json(await twin.createSyntheticSet(ctxOf(req), param(req, 'id'), body));
   }),
+);
+dataRouter.get('/sources/:id/retention', requirePermission('sources.read'), asyncHandler(async (req, res) => res.json(await retention.getRetention(ctxOf(req), param(req, 'id')))));
+dataRouter.patch(
+  '/sources/:id/retention',
+  requirePermission('firewall.signoff'),
+  asyncHandler(async (req, res) => res.json(await retention.setRetention(ctxOf(req), param(req, 'id'), parse(z.object({ policy: z.enum(retention.RETENTION_POLICIES), days: z.number().int().nullable().optional() }), req.body)))),
+);
+dataRouter.post(
+  '/sources/:id/purge',
+  requirePermission('firewall.signoff'),
+  asyncHandler(async (req, res) => res.json(await retention.requestPurge(ctxOf(req), param(req, 'id'), parse(z.object({ confirm: z.boolean(), reason: z.string().max(500) }), req.body)))),
 );
 dataRouter.get('/sources/:id/twin-plan', requirePermission('synthetic.write'), asyncHandler(async (req, res) => res.json(await twin.twinPlan(ctxOf(req), param(req, 'id')))));
 dataRouter.post(

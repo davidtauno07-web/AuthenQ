@@ -5,6 +5,7 @@ import { prisma } from '../lib/prisma.js';
 import { claimNext } from '../modules/jobs/queue.js';
 import { deliverPendingWebhooks } from '../modules/platform/events.js';
 import { runJob } from './handlers.js';
+import { enforceRetention } from '../services/retention.js';
 
 const workerId = `${hostname()}:${process.pid}`;
 let stopping = false;
@@ -41,6 +42,7 @@ async function webhookLoop() {
 async function housekeeping() {
   while (!stopping) {
     await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: new Date(Date.now() - 86_400_000) } } }).catch(() => undefined);
+    await enforceRetention().catch((err) => logger.error({ err }, 'retention sweep error'));
     await prisma.session.deleteMany({ where: { expiresAt: { lt: new Date(Date.now() - 7 * 86_400_000) } } }).catch(() => undefined);
     await new Promise((r) => setTimeout(r, 15 * 60_000));
   }

@@ -6,6 +6,7 @@ import { badRequest, gateBlocked, notFound } from '../lib/errors.js';
 import { storage, storageKey } from '../lib/storage.js';
 import { CLASSIFIER_VERSION, applyCombinationRisk, classifyColumn, guessPrimaryKey, inferRelations, inferType, type ColumnFinding } from '../domain/firewall.js';
 import { audit } from '../modules/audit.js';
+import { purgeSource } from './retention.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue, type JobReporter } from '../modules/jobs/queue.js';
 import { emit, notifyRole, recordUsage } from '../modules/platform/events.js';
@@ -611,6 +612,7 @@ export async function deleteSource(ctx: RequestContext, sourceId: string) {
     await tx.dataSource.update({ where: { id: sourceId }, data: { deletedAt: new Date(), status: 'DRAFT' } });
     await audit(ctx, { action: 'source.deleted', resourceType: 'data_source', resourceId: sourceId, summary: `Deleted data source "${s.name}" and its real rows` }, tx);
   });
+  if (!s.sourcePurgedAt) await purgeSource(ctx, sourceId, 'SOURCE_DELETED');
 }
 
 export { inferType };

@@ -643,6 +643,11 @@ model DataSource {
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   deletedAt          DateTime?
+  /// KEEP_UNTIL_DELETED | DELETE_AFTER_APPROVED_TWIN | DELETE_AFTER_DAYS
+  retentionPolicy    String    @default("KEEP_UNTIL_DELETED")
+  retentionDays      Int?
+  retentionUntil     DateTime?
+  sourcePurgedAt     DateTime?
 
   org       Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
   tables    SourceTable[]
@@ -1252,4 +1257,21 @@ model RateLimitBucket {
   count       Int
 
   @@map("rate_limit_buckets")
+}
+
+/// Result of deleting real source data. Never contains source content.
+model DeletionRecord {
+  id            String    @id @default(uuid()) @db.Uuid
+  orgId         String    @db.Uuid
+  sourceId      String    @db.Uuid
+  trigger       String // MANUAL | POLICY | SOURCE_DELETED
+  status        String    @default("RUNNING") // RUNNING | COMPLETED | PARTIAL | FAILED
+  items         Json      @default("[]")
+  limitations   Json      @default("[]")
+  requestedById String?   @db.Uuid
+  createdAt     DateTime  @default(now())
+  completedAt   DateTime?
+
+  @@index([orgId, sourceId])
+  @@map("deletion_records")
 }

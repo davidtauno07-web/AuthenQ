@@ -4,6 +4,7 @@ import { badRequest, gateBlocked, notFound } from '../lib/errors.js';
 import { normalize, signature } from '../domain/canary.js';
 import { generateTwin, TWIN_ALGORITHM_VERSION, type TwinTable } from '../domain/twin.js';
 import { learnPattern } from '../domain/patterns.js';
+import { enqueuePolicyPurge } from './retention.js';
 import { audit } from '../modules/audit.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue, type JobReporter } from '../modules/jobs/queue.js';
@@ -62,6 +63,7 @@ export async function createSyntheticSet(ctx: RequestContext, sourceId: string, 
   if (multiplier <= 0 || multiplier > 10) throw badRequest('The multiplier must be between 0.1 and 10.');
   const total = source.rowCount * multiplier;
   if (total > 2_000_000) throw badRequest('The requested synthetic set would exceed 2,000,000 rows. Lower the multiplier.');
+  if (source.sourcePurgedAt) throw gateBlocked('Twin generation', ['The real data for this source was deleted under its retention policy, so no new synthetic sets can be generated. Upload the data again as a new source.'], []);
   const plan = await twinPlan(ctx, sourceId);
   const strategies = input.strategies ?? {};
   const validKeys = new Set(plan.items.filter((i) => i.strategy).map((i) => `${i.table}.${i.column}`));
@@ -232,14 +234,18 @@ export async function reviewSet(ctx: RequestContext, setId: string, input: { app
   if (!input.approve && !reason) throw badRequest('Give a reason for rejecting the set.');
   if (input.approve && failing.length && !reason) throw badRequest(`These checks are outside their thresholds: ${failing.join(', ')}. Give a reason for approving anyway.`);
   const status = input.approve ? 'APPROVED' : 'REJECTED';
+  const src = await prisma.dataSource.findFirst({ where: { id: set.sourceId, orgId: ctx.orgId }, select: { retentionPolicy: true, sourcePurgedAt: true } });
   const updated = await prisma.syntheticSet.update({ where: { id: setId }, data: { approvalStatus: status, approvalReason: reason ?? null, approvedById: ctx.userId, approvedAt: new Date() } });
   await audit(ctx, { action: input.approve ? 'twin.approved' : 'twin.rejected', resourceType: 'synthetic_set', resourceId: setId, summary: `${input.approve ? 'Approved' : 'Rejected'} synthetic set "${set.name}"${reason ? ` — ${reason}` : ''}`, details: { failingChecks: failing } });
+  if (input.approve && src?.retentionPolicy === 'DELETE_AFTER_APPROVED_TWIN' && !src.sourcePurgedAt) await enqueuePolicyPurge(ctx.orgId, set.sourceId);
   return updated;
 }
 
 /** Admin-only comparison of real and synthetic rows. Rows are deliberately not paired. Always audited. */
 export async function compareSet(ctx: RequestContext, setId: string, tableName: string, limit: number) {
   const set = await getSetOrThrow(ctx, setId);
+  const src = await prisma.dataSource.findFirst({ where: { id: set.sourceId, orgId: ctx.orgId }, select: { sourcePurgedAt: true } });
+  if (src?.sourcePurgedAt) throw badRequest('The real data for this source has been deleted, so there is nothing to compare with.');
   const table = await prisma.sourceTable.findFirst({ where: { sourceId: set.sourceId, name: tableName } });
   if (!table) throw notFound('Table');
   const take = Math.min(Math.max(limit, 1), 20);

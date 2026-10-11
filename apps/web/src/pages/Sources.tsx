@@ -311,6 +311,7 @@ export function SourceDetail() {
         </Panel>
       </div>
 
+      <RetentionPanel sourceId={s.id} />
       {s.sets.length ? (
         <Panel title="Synthetic sets from this source">
           <table>
@@ -583,5 +584,86 @@ function DeleteSource({ id, name }: { id: string; name: string }) {
         </Modal>
       ) : null}
     </>
+  );
+}
+
+interface RetentionRes {
+  policy: string;
+  days: number | null;
+  until: string | null;
+  purgedAt: string | null;
+  storage: { rows: string; files: string; access: string };
+  limitations: string[];
+  records: { id: string; trigger: string; status: string; createdAt: string; items: { kind: string; description: string; found: number; deleted: number; remaining: number; verified: boolean }[] }[];
+}
+
+const POLICY_LABEL: Record<string, string> = {
+  KEEP_UNTIL_DELETED: 'Keep until I delete it (needed to regenerate or compare)',
+  DELETE_AFTER_APPROVED_TWIN: 'Delete once a synthetic set is approved',
+  DELETE_AFTER_DAYS: 'Delete after a number of days',
+};
+
+function RetentionPanel({ sourceId }: { sourceId: string }) {
+  const { can } = useAuth();
+  const q = useApi<RetentionRes>(`/sources/${sourceId}/retention`);
+  const [policy, setPolicy] = useState<string | null>(null);
+  const [days, setDays] = useState<number | null>(null);
+  const [purging, setPurging] = useState(false);
+  const save = useAction(() => api.patch(`/sources/${sourceId}/retention`, { policy: policy ?? q.data!.policy, days: (policy ?? q.data!.policy) === 'DELETE_AFTER_DAYS' ? days ?? q.data!.days ?? 30 : null }), { success: 'Retention policy saved.', invalidate: [`/sources/${sourceId}`], onSuccess: () => setPolicy(null) });
+  if (q.isLoading) return <Loading rows={3} />;
+  if (q.error) return <ErrorBox error={q.error} />;
+  const r = q.data!;
+  const cur = policy ?? r.policy;
+  const manage = can('firewall.signoff') && !r.purgedAt;
+  return (
+    <Panel title="Real data retention" actions={r.purgedAt ? <Badge tone="solid">Real data deleted {dateTime(r.purgedAt)}</Badge> : null}>
+      <div className="stack">
+        <p className="small">{r.storage.rows} {r.storage.files}</p>
+        <p className="small muted">{r.storage.access}</p>
+        {manage ? (
+          <div className="row" style={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <Field label="Policy">
+              <select value={cur} onChange={(e) => setPolicy(e.target.value)}>{Object.entries(POLICY_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+            </Field>
+            {cur === 'DELETE_AFTER_DAYS' ? <Field label="Days"><input type="number" min={1} max={3650} value={days ?? r.days ?? 30} onChange={(e) => setDays(Number(e.target.value))} style={{ width: 100 }} /></Field> : null}
+            <button disabled={save.isPending} onClick={() => save.mutate(undefined)}>Save policy</button>
+            <button className="danger" onClick={() => setPurging(true)}>Delete real data now</button>
+          </div>
+        ) : (
+          <p className="small">Policy: {POLICY_LABEL[r.policy] ?? r.policy}{r.until ? `, scheduled for ${dateTime(r.until)}` : ''}.</p>
+        )}
+        {r.until && manage ? <p className="small">Scheduled deletion: {dateTime(r.until)}.</p> : null}
+        <details>
+          <summary className="small">What deletion cannot cover</summary>
+          <ul className="small muted">{r.limitations.map((l) => <li key={l}>{l}</li>)}</ul>
+        </details>
+        {r.records.map((rec) => (
+          <div key={rec.id} className="stack" style={{ gap: 4 }}>
+            <div className="row small"><strong>{humanize(rec.trigger)} deletion</strong> <StatusBadge status={rec.status} /> <span className="muted">{dateTime(rec.createdAt)}</span></div>
+            <table>
+              <thead><tr><th>What</th><th className="num">Found</th><th className="num">Deleted</th><th className="num">Remaining</th><th>Verified</th></tr></thead>
+              <tbody>{rec.items.map((i) => <tr key={i.kind}><td className="small">{i.description}</td><td className="num">{num(i.found)}</td><td className="num">{num(i.deleted)}</td><td className="num">{num(i.remaining)}</td><td>{i.verified ? 'Yes' : <Badge tone="solid">No</Badge>}</td></tr>)}</tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+      {purging ? <PurgeModal sourceId={sourceId} onClose={() => setPurging(false)} /> : null}
+    </Panel>
+  );
+}
+
+function PurgeModal({ sourceId, onClose }: { sourceId: string; onClose: () => void }) {
+  const [reason, setReason] = useState('');
+  const [confirm, setConfirm] = useState(false);
+  const m = useAction(() => api.post(`/sources/${sourceId}/purge`, { confirm, reason }), { success: 'Real data deleted.', invalidate: [`/sources/${sourceId}`], onSuccess: onClose, silentError: true });
+  return (
+    <Modal title="Delete real data" onClose={onClose} footer={<><button onClick={onClose}>Cancel</button><button className="danger" disabled={!confirm || !reason.trim() || m.isPending} onClick={() => m.mutate(undefined)}>Delete real data</button></>}>
+      <div className="stack">
+        <div className="callout strong">This removes the real rows and uploaded files AuthenQ holds for this source and then checks that they are gone. Synthetic sets stay usable, but you can no longer generate new sets or compare with the source.</div>
+        <Field label="Reason (required)"><textarea value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        <label className="check"><input type="checkbox" checked={confirm} onChange={(e) => setConfirm(e.target.checked)} /><span className="small">I understand this cannot be undone in AuthenQ.</span></label>
+        <ErrorBox error={m.error} />
+      </div>
+    </Modal>
   );
 }

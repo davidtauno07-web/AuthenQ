@@ -12,6 +12,7 @@ export type JobType =
   | 'FIREWALL_INGEST'
   | 'FIREWALL_SCAN'
   | 'TWIN_GENERATE'
+  | 'SOURCE_PURGE'
   | 'SEND_TO_LABELING'
   | 'ENGINE_RUN'
   | 'EXPORT_BUILD'

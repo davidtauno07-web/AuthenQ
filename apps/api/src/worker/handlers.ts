@@ -4,6 +4,7 @@ import { runIngestJob, runScanJob } from '../services/firewall.js';
 import { runTwinJob } from '../services/twin.js';
 import { runEngineJob } from '../services/engine.js';
 import { runExportJob } from '../services/exports.js';
+import { runPurgeJob } from '../services/retention.js';
 import { prisma } from '../lib/prisma.js';
 
 type Handler = (orgId: string, payload: never, reporter: JobReporter) => Promise<unknown>;
@@ -14,6 +15,7 @@ export const HANDLERS: Record<string, Handler> = {
   TWIN_GENERATE: runTwinJob as Handler,
   ENGINE_RUN: runEngineJob as Handler,
   EXPORT_BUILD: runExportJob as Handler,
+  SOURCE_PURGE: runPurgeJob as Handler,
 };
 
 /** Marks the domain resource as failed when its job fails permanently. */
