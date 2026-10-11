@@ -1,7 +1,7 @@
 import { env } from '../config/env.js';
 import { prisma, Prisma } from '../lib/prisma.js';
 import { badRequest, gateBlocked, notFound } from '../lib/errors.js';
-import { normalize, signature } from '../domain/canary.js';
+import { normalize, signature, fuzzyKey } from '../domain/canary.js';
 import { generateTwin, TWIN_ALGORITHM_VERSION, type TwinTable } from '../domain/twin.js';
 import { learnPattern } from '../domain/patterns.js';
 import { enqueuePolicyPurge } from './retention.js';
@@ -167,6 +167,7 @@ export async function runTwinJob(orgId: string, payload: { setId: string }, repo
           normalized: norm,
           signature: signature(env.CANARY_SECRET, c.entityType, norm),
           entityType: c.entityType,
+          fuzzyKey: fuzzyKey(norm, c.entityType),
           generationMeta: { ...c.meta, seed: set.seed, setVersion: set.version, rowIndex: c.rowIndex } as Prisma.InputJsonValue,
         };
       }),

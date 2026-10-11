@@ -156,13 +156,13 @@ dataRouter.get('/canary/overview', requirePermission('canary.read'), asyncHandle
 dataRouter.get('/canary/registry', requirePermission('canary.read'), asyncHandler(async (req, res) => res.json(await canary.searchRegistry(ctxOf(req), String(req.query.q ?? ''), Math.min(Number(req.query.limit ?? 50), 200)))));
 dataRouter.get('/canary/registry/:id', requirePermission('canary.read'), asyncHandler(async (req, res) => res.json(await canary.traceValue(ctxOf(req), param(req, 'id')))));
 dataRouter.get('/canary/sends', requirePermission('canary.read'), asyncHandler(async (req, res) => res.json(await canary.listSends(ctxOf(req)))));
-dataRouter.get('/canary/alerts', requirePermission('canary.read'), asyncHandler(async (req, res) => res.json(await canary.listAlerts(ctxOf(req), req.query.status ? String(req.query.status) : undefined))));
+dataRouter.get('/canary/alerts', requirePermission('canary.read'), asyncHandler(async (req, res) => res.json(await canary.listAlerts(ctxOf(req), req.query.status ? String(req.query.status) : undefined, { matchType: req.query.matchType ? String(req.query.matchType) : undefined, q: req.query.q ? String(req.query.q).slice(0, 100) : undefined, assignedToMe: req.query.mine === '1' }))));
 dataRouter.patch(
   '/canary/alerts/:id',
   requirePermission('canary.scan'),
   asyncHandler(async (req, res) => {
-    const body = parse(z.object({ status: z.enum(['OPEN', 'ACKNOWLEDGED', 'RESOLVED']), note: z.string().max(1000).optional() }), req.body);
-    res.json(await canary.updateAlert(ctxOf(req), param(req, 'id'), body.status, body.note));
+    const body = parse(z.object({ status: z.enum(canary.ALERT_STATUSES).optional(), note: z.string().max(1000).optional(), assignedToId: z.string().uuid().nullable().optional() }), req.body);
+    res.json(await canary.updateAlert(ctxOf(req), param(req, 'id'), body));
   }),
 );
 dataRouter.post(

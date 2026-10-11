@@ -16,6 +16,52 @@ export function signature(secret: string, entityType: string, normalized: string
   return hmac(secret, `${entityType}:${normalized}`).slice(0, 32);
 }
 
+const DIGIT_TYPES = ['PHONE', 'CREDIT_CARD', 'GOVERNMENT_ID', 'FINANCIAL_ACCOUNT'];
+
+/** Key used for approximate matching. Null when the entity type has no meaningful approximate form. */
+export function fuzzyKey(normalized: string, entityType: string): string | null {
+  if (DIGIT_TYPES.includes(entityType)) return normalized.length >= 7 ? `d:${normalized.slice(-7)}` : null;
+  if (entityType === 'EMAIL') {
+    const local = normalized.split('@')[0] ?? '';
+    return local.length >= 5 ? `e:${local}` : null;
+  }
+  if (entityType === 'PERSON_NAME') {
+    const parts = normalized.split(' ').filter(Boolean);
+    return parts.length >= 2 ? `n:${[...parts].sort().join(' ')}` : null;
+  }
+  return null;
+}
+
+export type MatchType = 'EXACT' | 'NORMALIZED' | 'APPROXIMATE' | 'HEURISTIC';
+
+/** How a fuzzy-key hit relates to the registered value, with a confidence in [0, 1]. */
+export function classifyFuzzy(key: string): { matchType: MatchType; confidence: number; explanation: string } {
+  if (key.startsWith('d:')) return { matchType: 'APPROXIMATE', confidence: 0.7, explanation: 'The last 7 digits match a registered value, but the prefix or format differs.' };
+  if (key.startsWith('n:')) return { matchType: 'APPROXIMATE', confidence: 0.75, explanation: 'The same name parts appear in a different order.' };
+  return { matchType: 'HEURISTIC', confidence: 0.45, explanation: 'The email address before the @ matches a registered value, but the domain differs. This could be a coincidence.' };
+}
+
+/** Extracts fuzzy keys from text for approximate lookup. */
+export function extractFuzzy(text: string): Map<string, { raw: string; index: number }> {
+  const out = new Map<string, { raw: string; index: number }>();
+  const add = (key: string | null, raw: string, index: number) => {
+    if (key && out.size < MAX_CANDIDATES && !out.has(key)) out.set(key, { raw, index });
+  };
+  for (const m of text.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) add(fuzzyKey(m[0].toLowerCase(), 'EMAIL'), m[0], m.index ?? 0);
+  for (const m of text.matchAll(/\+?[\d][\d\s().-]{5,22}\d/g)) add(fuzzyKey(m[0].replace(/\D/g, ''), 'PHONE'), m[0], m.index ?? 0);
+  const words = [...text.matchAll(/\p{Lu}[\p{L}'-]+/gu)];
+  for (let i = 0; i + 1 < words.length; i++) {
+    for (const n of [2, 3]) {
+      const ws = words.slice(i, i + n);
+      if (ws.length < n) continue;
+      const last = ws[ws.length - 1]!;
+      if (text.slice(ws[0]!.index!, last.index! + last[0].length).length > ws.reduce((a, w) => a + w[0].length + 1, 0) + 2) continue;
+      add(fuzzyKey(ws.map((w) => w[0].toLowerCase()).join(' '), 'PERSON_NAME'), ws.map((w) => w[0]).join(' '), ws[0]!.index ?? 0);
+    }
+  }
+  return out;
+}
+
 const MAX_CANDIDATES = 50_000;
 
 /** Extracts normalized candidate tokens from text for indexed lookup. */

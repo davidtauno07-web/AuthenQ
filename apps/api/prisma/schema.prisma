@@ -866,12 +866,15 @@ model CanaryRegistry {
   normalized     String
   signature      String
   entityType     String
+  /// Key for approximate matching (last 7 digits, sorted name tokens, email local part).
+  fuzzyKey       String?
   generationMeta Json
   createdAt      DateTime   @default(now())
   exposures      Exposure[]
   alerts         LeakAlert[]
 
   @@index([orgId, normalized])
+  @@index([orgId, fuzzyKey])
   @@index([orgId, signature])
   @@index([setId])
   @@map("canary_registry")
@@ -933,7 +936,11 @@ model LeakAlert {
   registryId   String         @db.Uuid
   matchedText  String
   context      String
-  status       String         @default("OPEN") // OPEN | ACKNOWLEDGED | RESOLVED
+  status       String         @default("OPEN") // OPEN | INVESTIGATING | REVIEWED | RESOLVED | FALSE_POSITIVE (ACKNOWLEDGED kept for older alerts)
+  /// EXACT | NORMALIZED | APPROXIMATE | HEURISTIC
+  matchType    String         @default("NORMALIZED")
+  confidence   Float          @default(1)
+  assignedToId String?        @db.Uuid
   note         String?
   resolvedById String?        @db.Uuid
   createdAt    DateTime       @default(now())

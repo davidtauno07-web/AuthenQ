@@ -4,17 +4,17 @@ import { api, qs } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useAction, useApi } from '../lib/hooks';
 import { dateTime, humanize, num } from '../lib/format';
-import { Badge, Empty, ErrorBox, Field, Help, Json, Loading, PageHead, Panel, StatusBadge } from '../components/ui';
+import { Badge, Empty, ErrorBox, Field, Help, Json, Loading, Modal, PageHead, Panel, StatusBadge } from '../components/ui';
 
 interface Overview { registered: number; exposures: number; openAlerts: number; recentScans: { id: string; inputName: string; inputType: string; createdAt: string; matchCount?: number; candidates?: number }[]; disclaimer: string }
 interface RegistryRow { id: string; value: string; entityType: string; tableName: string; columnName: string; setId: string; createdAt: string; _count: { exposures: number; alerts: number } }
-interface AlertRow { id: string; status: string; matchedText: string; context: string; note: string | null; createdAt: string; registryId: string; registry: { value: string; entityType: string; tableName: string; columnName: string; setId: string }; scan: { inputName: string; inputType: string } }
+interface AlertRow { id: string; status: string; matchType: string; confidence: number; assignedToId: string | null; matchedText: string; context: string; note: string | null; createdAt: string; registryId: string; registry: { value: string; entityType: string; tableName: string; columnName: string; setId: string }; scan: { inputName: string; inputType: string } }
 interface SendRow { id: string; recipient: string; recipientType: string; channel: string; recordCount: number; createdAt: string; set: { name: string; version: number }; _count: { exposures: number } }
-interface ScanResult { scanId: string; candidates: number; matches: { registryId: string; value: string; entityType: string; matchedText: string; context: string; origin: { setId: string; table: string; column: string }; exposures: { recipient: string; channel: string; at: string }[] }[]; disclaimer: string }
+interface ScanResult { scanId: string; candidates: number; verdict: 'FOUND' | 'POSSIBLE' | 'NOT_FOUND'; recipients: { recipient: string; recipientType: string; channel: string }[]; limitations: string[]; matches: { registryId: string; value: string; entityType: string; matchedText: string; matchType: string; confidence: number; explanation: string; context: string; origin: { setId: string; table: string; column: string }; exposures: { recipient: string; channel: string; at: string }[] }[]; disclaimer: string }
 
 const TABS = [
   { key: 'overview', label: 'Overview' },
-  { key: 'scan', label: 'Scan' },
+  { key: 'scan', label: 'Was my data used?' },
   { key: 'alerts', label: 'Alerts' },
   { key: 'registry', label: 'Registry' },
   { key: 'sends', label: 'Sends' },
@@ -82,7 +82,7 @@ function ScanPanel() {
   if (!can('canary.scan')) return <p className="muted">Your role cannot run Canary scans.</p>;
   return (
     <div className="stack lg">
-      <Panel title="Scan text or a file">
+      <Panel title="Was my data used? Scan text or a file">
         <div className="stack">
           <Field label="Paste text" hint="Emails, forum posts, documents, model outputs — anything that may contain synthetic values.">
             <textarea rows={8} value={text} onChange={(e) => { setText(e.target.value); setFile(null); }} />
@@ -91,19 +91,25 @@ function ScanPanel() {
             <input type="file" accept=".txt,.csv,.tsv,.json,.jsonl,.md,.log" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
           </Field>
           <div><button className="primary" disabled={(!text.trim() && !file) || scan.isPending} onClick={() => scan.mutate(undefined)}>{scan.isPending ? 'Scanning…' : 'Scan'}</button></div>
-          <Help>Candidates (emails, phone numbers, identifiers and short phrases) are normalized and looked up in the indexed registry; each match is verified against its signature.</Help>
+          <Help>Emails, phone numbers, identifiers, names and short phrases are looked up in the registry: exactly, after normalising case and punctuation, and approximately (same last 7 digits, reordered names, same email name on another domain). Every match is verified against its keyed signature.</Help>
         </div>
       </Panel>
       {result ? (
         <Panel title={`Result: ${result.matches.length} match${result.matches.length === 1 ? '' : 'es'} from ${num(result.candidates)} candidates`}>
           <div className="stack">
-            {result.matches.length === 0 ? <div className="callout">No registered synthetic values were found. {result.disclaimer}</div> : (
+            <div className={`callout${result.verdict === 'FOUND' ? ' strong' : ''}`}>
+              {result.verdict === 'FOUND' ? <><strong>Yes: registered synthetic values were found.</strong> {result.recipients.length ? `They were previously sent to: ${result.recipients.map((r) => `${r.recipient} (${humanize(r.recipientType)})`).join(', ')}.` : 'No recorded send includes them.'}</> : null}
+              {result.verdict === 'POSSIBLE' ? <><strong>Possibly: only approximate or heuristic matches were found.</strong> Review the context before drawing conclusions.</> : null}
+              {result.verdict === 'NOT_FOUND' ? <><strong>No registered synthetic values were found.</strong></> : null}
+            </div>
+            {result.matches.length ? (
               <table>
-                <thead><tr><th>Value</th><th>Origin</th><th>Context</th><th>Previously sent to</th></tr></thead>
+                <thead><tr><th>Value</th><th>Match</th><th>Origin</th><th>Context</th><th>Previously sent to</th></tr></thead>
                 <tbody>
                   {result.matches.map((m) => (
                     <tr key={m.registryId}>
                       <td><Link to={`/canary/values/${m.registryId}`}><strong>{m.value}</strong></Link><div className="small muted">{humanize(m.entityType)}</div></td>
+                      <td><Badge tone={m.confidence >= 0.9 ? 'solid' : 'outline-strong'} title={m.explanation}>{humanize(m.matchType)}</Badge><div className="small muted">{Math.round(m.confidence * 100)}% · found "{m.matchedText}"</div></td>
                       <td className="small"><code>{m.origin.table}.{m.origin.column}</code></td>
                       <td className="small" style={{ maxWidth: 360 }}>{m.context}</td>
                       <td className="small">{m.exposures.length ? m.exposures.map((e, i) => <div key={i}>{e.recipient} · {e.channel} · {dateTime(e.at)}</div>) : <span className="muted">No recorded sends</span>}</td>
@@ -111,7 +117,8 @@ function ScanPanel() {
                   ))}
                 </tbody>
               </table>
-            )}
+            ) : null}
+            <details><summary className="small">Limitations of this scan</summary><ul className="small muted">{result.limitations.map((l) => <li key={l}>{l}</li>)}</ul></details>
           </div>
         </Panel>
       ) : null}
@@ -119,38 +126,76 @@ function ScanPanel() {
   );
 }
 
+const ALERT_STATUS = [['OPEN', 'Open'], ['INVESTIGATING', 'Investigating'], ['REVIEWED', 'Reviewed'], ['RESOLVED', 'Resolved'], ['FALSE_POSITIVE', 'False positive'], ['ACKNOWLEDGED', 'Acknowledged (older)']] as const;
+
 function Alerts() {
-  const { can } = useAuth();
+  const { can, me } = useAuth();
+  const user = me?.user;
   const [status, setStatus] = useState('OPEN');
-  const q = useApi<AlertRow[]>(`/canary/alerts${qs({ status })}`);
-  const update = useAction((v: { id: string; status: string }) => api.patch(`/canary/alerts/${v.id}`, { status: v.status }), { success: 'Alert updated.', invalidate: ['/canary'] });
+  const [matchType, setMatchType] = useState('');
+  const [search, setSearch] = useState('');
+  const [mine, setMine] = useState(false);
+  const [acting, setActing] = useState<{ alert: AlertRow; status: string } | null>(null);
+  const q = useApi<AlertRow[]>(`/canary/alerts${qs({ status, matchType, q: search, mine: mine ? '1' : '' })}`, { keepPrevious: true });
+  const assign = useAction((v: { id: string; to: string | null }) => api.patch(`/canary/alerts/${v.id}`, { assignedToId: v.to }), { success: 'Assignment updated.', invalidate: ['/canary'] });
   return (
     <div className="stack">
-      <div className="row">
-        <select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 200 }}>
-          <option value="OPEN">Open</option><option value="ACKNOWLEDGED">Acknowledged</option><option value="RESOLVED">Resolved</option><option value="">All</option>
+      <div className="row" style={{ flexWrap: 'wrap' }}>
+        <select aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)} style={{ width: 180 }}>
+          {ALERT_STATUS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}<option value="">All statuses</option>
         </select>
+        <select aria-label="Match type" value={matchType} onChange={(e) => setMatchType(e.target.value)} style={{ width: 180 }}>
+          <option value="">All match types</option><option value="EXACT">Exact</option><option value="NORMALIZED">Normalized</option><option value="APPROXIMATE">Approximate</option><option value="HEURISTIC">Heuristic</option>
+        </select>
+        <input placeholder="Search text, context or source" aria-label="Search alerts" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 240 }} />
+        <label className="check"><input type="checkbox" checked={mine} onChange={(e) => setMine(e.target.checked)} /><span className="small">Assigned to me</span></label>
       </div>
-      {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : !q.data!.length ? <Empty title="No alerts">No alerts match this filter.</Empty> : (
+      {q.isLoading ? <Loading /> : q.error ? <ErrorBox error={q.error} /> : !q.data!.length ? <Empty title="No alerts">No alerts match these filters.</Empty> : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Value</th><th>Found in</th><th>Context</th><th>Status</th><th>When</th><th /></tr></thead>
+            <thead><tr><th>Value</th><th>Match</th><th>Found in</th><th>Evidence</th><th>Status</th><th>When</th><th /></tr></thead>
             <tbody>
               {q.data!.map((a) => (
                 <tr key={a.id}>
                   <td><Link to={`/canary/values/${a.registryId}`}><strong>{a.registry.value}</strong></Link><div className="small muted"><code>{a.registry.tableName}.{a.registry.columnName}</code></div></td>
+                  <td><Badge tone={a.confidence >= 0.9 ? 'solid' : 'outline-strong'}>{humanize(a.matchType)}</Badge><div className="small muted">{Math.round(a.confidence * 100)}%</div></td>
                   <td>{a.scan.inputName}<div className="small muted">{humanize(a.scan.inputType)}</div></td>
-                  <td className="small" style={{ maxWidth: 360 }}>{a.context}</td>
-                  <td><StatusBadge status={a.status} /></td>
+                  <td className="small" style={{ maxWidth: 340 }}>{a.context}{a.note ? <div className="muted" style={{ whiteSpace: 'pre-wrap', marginTop: 4 }}>{a.note}</div> : null}</td>
+                  <td><StatusBadge status={a.status} />{a.assignedToId ? <div className="small muted">{a.assignedToId === user?.id ? 'Assigned to you' : 'Assigned'}</div> : null}</td>
                   <td className="small muted">{dateTime(a.createdAt)}</td>
-                  <td>{can('canary.scan') ? <div className="row">{a.status !== 'ACKNOWLEDGED' ? <button className="sm" onClick={() => update.mutate({ id: a.id, status: 'ACKNOWLEDGED' })}>Acknowledge</button> : null}{a.status !== 'RESOLVED' ? <button className="sm" onClick={() => update.mutate({ id: a.id, status: 'RESOLVED' })}>Resolve</button> : null}</div> : null}</td>
+                  <td>
+                    {can('canary.scan') ? (
+                      <div className="row" style={{ flexWrap: 'wrap' }}>
+                        {a.assignedToId !== user?.id ? <button className="sm ghost" onClick={() => assign.mutate({ id: a.id, to: user?.id ?? null })}>Assign to me</button> : <button className="sm ghost" onClick={() => assign.mutate({ id: a.id, to: null })}>Unassign</button>}
+                        {['OPEN', 'ACKNOWLEDGED'].includes(a.status) ? <button className="sm" onClick={() => setActing({ alert: a, status: 'INVESTIGATING' })}>Investigate</button> : null}
+                        {!['RESOLVED', 'FALSE_POSITIVE'].includes(a.status) ? <><button className="sm" onClick={() => setActing({ alert: a, status: 'REVIEWED' })}>Reviewed</button><button className="sm" onClick={() => setActing({ alert: a, status: 'RESOLVED' })}>Resolve</button><button className="sm" onClick={() => setActing({ alert: a, status: 'FALSE_POSITIVE' })}>False positive</button></> : <button className="sm" onClick={() => setActing({ alert: a, status: 'OPEN' })}>Reopen</button>}
+                      </div>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       )}
+      {acting ? <AlertAction alert={acting.alert} status={acting.status} onClose={() => setActing(null)} /> : null}
     </div>
+  );
+}
+
+function AlertAction({ alert, status, onClose }: { alert: AlertRow; status: string; onClose: () => void }) {
+  const [note, setNote] = useState('');
+  const closing = ['RESOLVED', 'FALSE_POSITIVE'].includes(status);
+  const needNote = closing && !alert.note;
+  const m = useAction(() => api.patch(`/canary/alerts/${alert.id}`, { status, note: note || undefined }), { success: 'Alert updated.', invalidate: ['/canary'], onSuccess: onClose, silentError: true });
+  return (
+    <Modal title={`Mark alert as ${humanize(status).toLowerCase()}`} onClose={onClose} footer={<><button onClick={onClose}>Cancel</button><button className="primary" disabled={m.isPending || (needNote && !note.trim())} onClick={() => m.mutate(undefined)}>Save</button></>}>
+      <div className="stack">
+        <p className="small">Found "{alert.matchedText}" in {alert.scan.inputName}.</p>
+        <Field label={needNote ? 'Note (required to close)' : 'Note (optional)'} hint="Notes are added to the alert history with your name and the time."><textarea value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+        <ErrorBox error={m.error} />
+      </div>
+    </Modal>
   );
 }
 
