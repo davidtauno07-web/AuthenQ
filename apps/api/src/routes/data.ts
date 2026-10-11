@@ -97,11 +97,24 @@ dataRouter.post(
         seed: z.number().int().min(0).max(2 ** 31).optional(),
         multiplier: z.number().min(0.1).max(10).optional(),
         amplify: z.array(z.object({ table: z.string(), column: z.string(), value: z.string(), factor: z.number().min(1).max(20) })).max(20).optional(),
+        strategies: z.record(z.enum(['PATTERN', 'GENERIC'])).optional(),
+        acknowledgeReview: z.boolean().optional(),
       }),
       req.body,
     );
     res.status(202).json(await twin.createSyntheticSet(ctxOf(req), param(req, 'id'), body));
   }),
+);
+dataRouter.get('/sources/:id/twin-plan', requirePermission('synthetic.write'), asyncHandler(async (req, res) => res.json(await twin.twinPlan(ctxOf(req), param(req, 'id')))));
+dataRouter.post(
+  '/synthetic-sets/:id/review',
+  requirePermission('firewall.signoff'),
+  asyncHandler(async (req, res) => res.json(await twin.reviewSet(ctxOf(req), param(req, 'id'), parse(z.object({ approve: z.boolean(), reason: z.string().max(500).optional() }), req.body)))),
+);
+dataRouter.get(
+  '/synthetic-sets/:id/compare',
+  requirePermission('sources.real.preview'),
+  asyncHandler(async (req, res) => res.json(await twin.compareSet(ctxOf(req), param(req, 'id'), String(req.query.table ?? ''), Number(req.query.limit ?? 10)))),
 );
 dataRouter.get('/synthetic-sets/:id', requirePermission('synthetic.read'), asyncHandler(async (req, res) => res.json(await twin.getSetDetail(ctxOf(req), param(req, 'id')))));
 dataRouter.get(

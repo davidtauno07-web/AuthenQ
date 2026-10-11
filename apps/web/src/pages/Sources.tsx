@@ -478,6 +478,11 @@ function PreviewModal({ sourceId, tableId, onClose }: { sourceId: string; tableI
   );
 }
 
+interface TwinPlan {
+  items: { table: string; column: string; decision: string; strategy: string | null; treatment: string; review: boolean; reviewReason: string | null; pattern: { confidence: number; preserves: string[]; limitations: string[] } | null }[];
+  needsAcknowledgement: boolean;
+}
+
 function TwinModal({ source, onClose }: { source: SourceDetailRes; onClose: () => void }) {
   const nav = useNavigate();
   const [name, setName] = useState(`${source.name} — synthetic v${source.sets.length + 1}`);
@@ -485,15 +490,54 @@ function TwinModal({ source, onClose }: { source: SourceDetailRes; onClose: () =
   const [multiplier, setMultiplier] = useState(1);
   const [amp, setAmp] = useState<{ table: string; column: string; value: string; factor: number }[]>([]);
   const outcomeCols = source.tables.flatMap((t) => t.columns.filter((c) => c.decision === 'KEEP' && ['OUTCOME', 'NON_SENSITIVE'].includes(c.classification) && c.dataType === 'string').map((c) => ({ table: t.name, column: c.name })));
-  const gen = useAction(() => api.post<{ id: string }>(`/sources/${source.id}/synthetic-sets`, { name, seed, multiplier, amplify: amp.filter((a) => a.value) }), {
+  const plan = useApi<TwinPlan>(`/sources/${source.id}/twin-plan`);
+  const [strategies, setStrategies] = useState<Record<string, 'PATTERN' | 'GENERIC'>>({});
+  const [ack, setAck] = useState(false);
+  const replaced = plan.data?.items.filter((i) => i.strategy) ?? [];
+  const flagged = replaced.filter((i) => i.review && (strategies[`${i.table}.${i.column}`] ?? 'PATTERN') === 'PATTERN');
+  const gen = useAction(() => api.post<{ id: string }>(`/sources/${source.id}/synthetic-sets`, { name, seed, multiplier, amplify: amp.filter((a) => a.value), strategies, acknowledgeReview: ack || undefined }), {
     success: 'Synthetic generation started.',
     invalidate: ['/synthetic-sets', `/sources/${source.id}`],
     onSuccess: (r) => nav(`/synthetic/${r.id}`),
     silentError: true,
   });
   return (
-    <Modal title="Generate synthetic twin" onClose={onClose} footer={<><button onClick={onClose}>Cancel</button><button className="primary" disabled={gen.isPending} onClick={() => gen.mutate(undefined)}>Generate</button></>}>
+    <Modal wide title="Generate synthetic twin" onClose={onClose} footer={<><button onClick={onClose}>Cancel</button><button className="primary" disabled={gen.isPending || plan.isLoading || (flagged.length > 0 && !ack)} onClick={() => gen.mutate(undefined)}>Generate</button></>}>
       <div className="stack">
+        <fieldset>
+          <legend>Generation plan</legend>
+          {plan.isLoading ? <Loading rows={3} /> : plan.error ? <ErrorBox error={plan.error} /> : (
+            <div className="stack" style={{ gap: 8 }}>
+              <p className="small muted">Twin learns formats from the source (aggregate statistics only, groups under 5 values ignored) and generates new values. Review how each replaced column is generated.</p>
+              <div className="table-wrap" style={{ maxHeight: 260 }}>
+                <table>
+                  <thead><tr><th>Column</th><th>Strategy</th><th>What is preserved</th><th className="num">Pattern confidence</th></tr></thead>
+                  <tbody>
+                    {replaced.map((i) => {
+                      const k = `${i.table}.${i.column}`;
+                      return (
+                        <tr key={k}>
+                          <td><code>{k}</code>{i.review ? <div><Badge tone="solid">Needs review</Badge></div> : null}</td>
+                          <td>
+                            <select aria-label={`Strategy for ${k}`} value={strategies[k] ?? 'PATTERN'} onChange={(e) => setStrategies({ ...strategies, [k]: e.target.value as 'PATTERN' | 'GENERIC' })}>
+                              <option value="PATTERN">Follow learned pattern</option>
+                              <option value="GENERIC">Generic format only</option>
+                            </select>
+                          </td>
+                          <td className="small">{i.pattern?.preserves.join(', ')}{i.pattern?.limitations.length ? <div className="muted">{i.pattern.limitations.join(' ')}</div> : null}</td>
+                          <td className="num">{i.pattern ? pct(i.pattern.confidence, 0) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {flagged.length ? (
+                <label className="check"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /><span className="small">I reviewed the {flagged.length} weak pattern(s) above and accept that generated values may look less like the source.</span></label>
+              ) : null}
+            </div>
+          )}
+        </fieldset>
         <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} /></Field>
         <div className="grid cols-2">
           <Field label="Seed" hint="Same seed and decisions produce the same twin."><input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} /></Field>

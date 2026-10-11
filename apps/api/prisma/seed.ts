@@ -112,6 +112,7 @@ async function main() {
   log('Twin: generating synthetic copy…');
   const created = await twin.createSyntheticSet(eng, source.id, { name: 'Support Tickets — synthetic v1', seed: 42, multiplier: 1 });
   await drainJobs();
+  await twin.reviewSet(admin, created.id, { approve: true, reason: 'Demo: reviewed the quality, pattern and safety report.' });
   const set = await prisma.syntheticSet.findUniqueOrThrow({ where: { id: (created as { id: string }).id } });
   if (set.status !== 'READY') throw new Error(`Synthetic set ended in status ${set.status}; the demo seed expects READY.`);
   log(`Twin: ${set.rowCount} synthetic rows, ${set.canaryCount} Canary values registered.`);

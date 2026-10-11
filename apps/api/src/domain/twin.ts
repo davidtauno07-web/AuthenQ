@@ -1,5 +1,6 @@
 import { createRng, hashSeed, type Rng } from '../lib/prng.js';
 import { detectTextEntities } from './firewall.js';
+import { conformance, generateFromPattern, learnPattern, type LearnedPattern } from './patterns.js';
 
 /**
  * Twin: generates complete synthetic copies of a source. Pure function over
@@ -7,7 +8,7 @@ import { detectTextEntities } from './firewall.js';
  * Real values are never copied for REPLACE columns; KEEP columns are sampled
  * from the empirical distribution, numeric KEEP columns are perturbed.
  */
-export const TWIN_ALGORITHM_VERSION = 'twin-1.2';
+export const TWIN_ALGORITHM_VERSION = 'twin-2.0';
 
 export interface TwinColumn {
   name: string;
@@ -38,7 +39,11 @@ export interface TwinConfig {
   seed: number;
   multiplier: number;
   amplify?: { table: string; column: string; value: string; factor: number }[];
+  /** Per "table.column": PATTERN follows learned source formats (default), GENERIC uses format-only replacement. */
+  strategies?: Record<string, 'PATTERN' | 'GENERIC'>;
 }
+
+export type PatternReport = LearnedPattern & { strategy: 'PATTERN' | 'GENERIC'; conformance: number };
 
 export interface CanaryValue {
   tableName: string;
@@ -71,6 +76,7 @@ export interface QualityReport {
   tables: { name: string; sourceRows: number; syntheticRows: number }[];
   columns: { table: string; column: string; decision: string; distance: number | null; note: string }[];
   safety: { realValueCollisions: number; copiedRealRows: number; passed: boolean; explanation: string };
+  patterns?: PatternReport[];
 }
 
 const FIRST = ['Avery', 'Jordan', 'Riley', 'Quinn', 'Morgan', 'Rowan', 'Emery', 'Hayden', 'Sasha', 'Kendall', 'Marlow', 'Tatum', 'Arden', 'Lennox', 'Sloane', 'Reese', 'Ellis', 'Briar', 'Caden', 'Darcy', 'Ember', 'Finley', 'Greer', 'Harlow', 'Indy', 'Jules', 'Kai', 'Laken', 'Milan', 'Noor', 'Oakley', 'Peyton', 'Remy', 'Shiloh', 'Teagan', 'Vale', 'Wren', 'Zion'];
@@ -308,6 +314,17 @@ export function generateTwin(tables: TwinTable[], relations: TwinRelation[], con
   const realValues = new Set<string>();
   for (const t of tables) for (const c of t.columns) if (c.decision === 'REPLACE') for (const r of t.rows) if (r[c.name] != null) realValues.add(String(r[c.name]).toLowerCase());
   const issued = new Set<string>();
+  const learned: LearnedPattern[] = [];
+  const patternFor = new Map<string, LearnedPattern>();
+  for (const t of tables) {
+    for (const c of t.columns) {
+      if (c.decision !== 'REPLACE' || c.isPrimaryKey) continue;
+      const lp = learnPattern(t.name, c, t.rows.map((r) => r[c.name]));
+      learned.push(lp);
+      if ((config.strategies?.[`${t.name}.${c.name}`] ?? 'PATTERN') === 'PATTERN') patternFor.set(`${t.name}.${c.name}`, lp);
+    }
+  }
+  const generatedByCol = new Map<string, string[]>();
   const columnReport: QualityReport['columns'] = [];
   let collisions = 0;
 
@@ -371,9 +388,13 @@ export function generateTwin(tables: TwinTable[], relations: TwinRelation[], con
         }
         switch (col.decision) {
           case 'REPLACE': {
-            const v = fresh(() => replaceValue(col.entityType, String(real), rng, personName));
+            const ck = `${table.name}.${col.name}`;
+            const lp = patternFor.get(ck);
+            const v = fresh(() => (lp ? generateFromPattern(lp, rng, personName) : null) ?? replaceValue(col.entityType, String(real), rng, personName));
             row[col.name] = v;
-            canaries.push({ tableName: table.name, rowIndex: i, columnName: col.name, value: v, entityType: col.entityType ?? 'GENERIC', meta: { algorithm: TWIN_ALGORITHM_VERSION, decision: 'REPLACE' } });
+            if (!generatedByCol.has(ck)) generatedByCol.set(ck, []);
+            generatedByCol.get(ck)!.push(v);
+            canaries.push({ tableName: table.name, rowIndex: i, columnName: col.name, value: v, entityType: col.entityType ?? 'GENERIC', meta: { algorithm: TWIN_ALGORITHM_VERSION, decision: 'REPLACE', strategy: lp ? 'PATTERN' : 'GENERIC' } });
             break;
           }
           case 'GENERALIZE':
@@ -445,6 +466,23 @@ export function generateTwin(tables: TwinTable[], relations: TwinRelation[], con
   }
 
   const report = buildReport(tables, relations, output, columnReport, collisions, config);
+  const patterns: PatternReport[] = learned.map((lp) => {
+    const ck = `${lp.table}.${lp.column}`;
+    return { ...lp, strategy: patternFor.has(ck) ? 'PATTERN' : 'GENERIC', conformance: conformance(lp, generatedByCol.get(ck) ?? []) };
+  });
+  const used = patterns.filter((x) => x.strategy === 'PATTERN');
+  const avg = used.length ? used.reduce((a, x) => a + x.conformance, 0) / used.length : 1;
+  report.metrics.push({
+    key: 'patterns',
+    label: 'Pattern conformance',
+    value: round(avg),
+    threshold: 0.9,
+    withinThreshold: avg >= 0.9,
+    explanation: used.length
+      ? `${used.length} replaced column(s) follow learned source patterns; on average ${Math.round(avg * 100)}% of generated values use a format the source uses.`
+      : 'No replaced column uses pattern learning.',
+  });
+  report.patterns = patterns;
   return { tables: output, canaries, report };
 }
 

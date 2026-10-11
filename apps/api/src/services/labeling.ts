@@ -69,6 +69,7 @@ export async function sendToLabeling(ctx: RequestContext, input: SendInput) {
   const set = await prisma.syntheticSet.findFirst({ where: { id: input.setId, orgId: ctx.orgId, deletedAt: null } });
   if (!set) throw notFound('Synthetic set');
   if (set.status !== 'READY') throw badRequest(`Only ready synthetic sets can be sent to labeling (this one is ${set.status.toLowerCase().replace('_', ' ')}).`);
+  if (set.approvalStatus !== 'APPROVED') throw badRequest('This synthetic set has not been approved yet. An administrator must review and approve it first.');
   if (input.labels.length < 2) throw badRequest('Define at least two labels.');
   const values = input.labels.map((l) => l.value.trim());
   if (new Set(values).size !== values.length || values.some((v) => !v)) throw badRequest('Label names must be unique and not empty.');

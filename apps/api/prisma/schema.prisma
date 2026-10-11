@@ -820,6 +820,11 @@ model SyntheticSet {
   createdAt        DateTime       @default(now())
   completedAt      DateTime?
   deletedAt        DateTime?
+  /// PENDING | APPROVED | REJECTED — human approval of the generated set before it can leave Twin.
+  approvalStatus   String         @default("PENDING")
+  approvalReason   String?
+  approvedById     String?        @db.Uuid
+  approvedAt       DateTime?
   source           DataSource     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   rows             SyntheticRow[]
   sends            Send[]
