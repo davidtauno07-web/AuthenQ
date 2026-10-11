@@ -67,6 +67,22 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body ?? {}),
   del: <T>(path: string, body?: unknown) => request<T>('DELETE', path, body),
   upload: <T>(path: string, form: FormData) => request<T>('POST', path, form),
+  /** POSTs JSON and saves the binary response as a file download. */
+  download: async (path: string, body: unknown, fallbackName: string) => {
+    const res = await fetch(BASE + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': csrf() }, body: JSON.stringify(body), credentials: 'same-origin' });
+    if (!res.ok) {
+      const json = (await res.json().catch(() => null)) as { error?: ApiErrorBody } | null;
+      throw new ApiError(res.status, json?.error ?? { code: 'HTTP_' + res.status, message: `The server answered with status ${res.status}.` });
+    }
+    const name = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') ?? '')?.[1] ?? fallbackName;
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return { records: Number(res.headers.get('x-record-count') ?? 0) };
+  },
 };
 
 export function qs(params: Record<string, string | number | boolean | undefined | null>) {

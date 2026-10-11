@@ -1,12 +1,15 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import { asyncHandler, pageOf, param, parse } from '../lib/http.js';
 import { requirePermission } from '../middleware/auth.js';
+import { badRequest } from '../lib/errors.js';
 import { ctxOf } from '../modules/context.js';
 import * as L from '../services/labeling.js';
 import * as E from '../services/engine.js';
 import * as X from '../services/exports.js';
 import { qualityReport } from '../services/quality.js';
+import * as XL from '../services/externalLabels.js';
 
 export const labelingRouter = Router();
 const P = '/projects/:projectId';
@@ -167,6 +170,20 @@ labelingRouter.post(`${P}/review-bulk-accept`, requirePermission('labeling.revie
 labelingRouter.get(`${P}/quality`, requirePermission('quality.read'), asyncHandler(async (req, res) => res.json(await qualityReport(ctxOf(req), pid(req)))));
 
 // Exports
+const labelUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: XL.MAX_IMPORT_BYTES, files: 1 } });
+labelingRouter.post(`${P}/external-export`, requirePermission('labeling.manage'), asyncHandler(async (req, res) => {
+  const body = parse(z.object({ format: z.enum(XL.EXTERNAL_FORMATS), onlyUnlabeled: z.boolean().default(true), recipient: z.string().trim().min(2).max(120) }), req.body);
+  const out = await XL.externalExport(ctxOf(req), pid(req), body);
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+  res.setHeader('X-Record-Count', String(out.records));
+  res.send(out.zip);
+}));
+labelingRouter.post(`${P}/external-import`, requirePermission('labeling.manage'), labelUpload.single('file'), asyncHandler(async (req, res) => {
+  if (!req.file) throw badRequest('Choose a file to import.');
+  const flags = parse(z.object({ dryRun: z.enum(['true', 'false']).default('true'), acceptErrors: z.enum(['true', 'false']).default('false') }), req.body);
+  res.json(await XL.importExternalLabels(ctxOf(req), pid(req), { content: req.file.buffer.toString('utf8'), filename: req.file.originalname, dryRun: flags.dryRun === 'true', acceptErrors: flags.acceptErrors === 'true' }));
+}));
 labelingRouter.get('/export-formats', requirePermission('exports.read'), (_req, res) => {
   res.json(Object.values(X.FORMATS).map(({ key, name, extension, description }) => ({ key, name, extension, description })));
 });

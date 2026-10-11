@@ -414,6 +414,7 @@ export function Exports() {
           </div>
         </Panel>
       ) : null}
+      {can('labeling.manage') ? <ExternalLabeling projectId={p.id} /> : null}
       <Panel title="Exports" flat>
         {list.isLoading ? <Loading /> : !list.data?.length ? <p className="muted" style={{ padding: 12 }}>No exports yet.</p> : (
           <table>
@@ -443,5 +444,68 @@ export function Exports() {
         </Modal>
       ) : null}
     </div>
+  );
+}
+
+interface ImportIssue { row: number; taskId: string | null; problem: string }
+interface ImportSummary { rows: number; valid: number; empty: number; errors: ImportIssue[]; conflicts: ImportIssue[]; imported: number; batchId: string | null }
+
+function ExternalLabeling({ projectId }: { projectId: string }) {
+  const [format, setFormat] = useState('csv');
+  const [recipient, setRecipient] = useState('');
+  const [onlyUnlabeled, setOnlyUnlabeled] = useState(true);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<ImportSummary | null>(null);
+  const [acceptErrors, setAcceptErrors] = useState(false);
+  const exp = useAction(() => api.download(`/projects/${projectId}/external-export`, { format, recipient, onlyUnlabeled }, 'external-labeling.zip'), { success: (r) => `Downloaded ${num((r as { records: number }).records)} synthetic records. The transfer is recorded in Canary.`, invalidate: ['/canary'] });
+  const send = (dryRun: boolean) => {
+    const f = new FormData();
+    f.append('file', file!);
+    f.append('dryRun', String(dryRun));
+    f.append('acceptErrors', String(acceptErrors));
+    return api.upload<ImportSummary>(`/projects/${projectId}/external-import`, f);
+  };
+  const check = useAction(() => send(true), { onSuccess: (r) => { setPreview(r); setAcceptErrors(false); } });
+  const commit = useAction(() => send(false), { success: (r) => `Imported ${num((r as ImportSummary).imported)} labels.`, invalidate: [`/projects/${projectId}`], onSuccess: (r) => { setPreview(r); setFile(null); } });
+  return (
+    <Panel title="Label outside AuthenQ">
+      <div className="stack">
+        <p className="small muted">Download synthetic records as a labeling template for another tool, then import the completed file. Locked test records are never included.</p>
+        <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+          <Field label="Recipient or tool"><input value={recipient} onChange={(e) => setRecipient(e.target.value)} placeholder="e.g. Vendor labeling team" style={{ width: 240 }} /></Field>
+          <Field label="Format"><select value={format} onChange={(e) => setFormat(e.target.value)} style={{ width: 120 }}><option value="csv">CSV</option><option value="json">JSON</option><option value="jsonl">JSONL</option></select></Field>
+          <label className="check"><input type="checkbox" checked={onlyUnlabeled} onChange={(e) => setOnlyUnlabeled(e.target.checked)} />Only records without a label</label>
+          <button disabled={recipient.trim().length < 2 || exp.isPending} onClick={() => exp.mutate(undefined)}>{exp.isPending ? 'Preparing…' : 'Download template'}</button>
+        </div>
+        <ErrorBox error={exp.error} />
+        <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+          <Field label="Completed file" hint="CSV, TSV, JSON or JSONL with authenq_task_id and label columns, up to 10 MB."><input type="file" accept=".csv,.tsv,.json,.jsonl" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setPreview(null); }} /></Field>
+          <button disabled={!file || check.isPending} onClick={() => check.mutate(undefined)}>Check file</button>
+        </div>
+        <ErrorBox error={check.error ?? commit.error} />
+        {preview ? (
+          <div className="stack">
+            <div className="callout small">
+              {preview.imported ? <strong>Imported {num(preview.imported)} labels. </strong> : null}
+              {num(preview.rows)} rows: {num(preview.valid)} valid, {num(preview.empty)} without a label, {num(preview.errors.length)} with problems, {num(preview.conflicts.length)} conflicting with existing labels (these go to review).
+            </div>
+            {preview.errors.length || preview.conflicts.length ? (
+              <div className="table-wrap" style={{ maxHeight: 240 }}>
+                <table>
+                  <thead><tr><th className="num">Row</th><th>Record</th><th>Problem</th></tr></thead>
+                  <tbody>{[...preview.errors.map((e) => ({ ...e, kind: 'error' })), ...preview.conflicts.map((c) => ({ ...c, kind: 'conflict' }))].slice(0, 200).map((e, i) => <tr key={i}><td className="num">{e.row}</td><td className="mono small">{e.taskId?.slice(0, 8) ?? '—'}</td><td className="small">{e.kind === 'conflict' ? <Badge tone="outline-strong">conflict</Badge> : null} {e.problem}</td></tr>)}</tbody>
+                </table>
+              </div>
+            ) : null}
+            {!preview.imported && preview.valid ? (
+              <div className="row">
+                {preview.errors.length ? <label className="check"><input type="checkbox" checked={acceptErrors} onChange={(e) => setAcceptErrors(e.target.checked)} />Import only the {num(preview.valid)} valid rows</label> : null}
+                <button className="primary" disabled={commit.isPending || (preview.errors.length > 0 && !acceptErrors)} onClick={() => commit.mutate(undefined)}>Import labels</button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+    </Panel>
   );
 }
