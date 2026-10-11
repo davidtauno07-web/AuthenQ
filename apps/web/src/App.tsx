@@ -70,6 +70,7 @@ export function App() {
           <Route path="review" element={<Review />} />
           <Route path="quality" element={<Quality />} />
           <Route path="exports" element={<Exports />} />
+          <Route path="export" element={<Navigate to="../exports" replace />} />
         </Route>
         <Route path="activity" element={guard('activity.read', <Activity />)} />
         <Route path="jobs" element={<Jobs />} />
