@@ -360,12 +360,21 @@ platformRouter.get('/connectors', requirePermission('sources.read'), asyncHandle
   res.json({ types: await C.availableConnectorTypes(ctx.orgId), connectors: await C.listConnectors(ctx) });
 }));
 platformRouter.post('/connectors', requirePermission('connectors.manage'), asyncHandler(async (req, res) => {
-  const body = parse(z.object({ type: z.string(), name: z.string().trim().min(2).max(80), connectionString: z.string().min(10).max(1000) }), req.body);
-  res.status(201).json(await C.createConnector(ctxOf(req), body));
+  const body = parse(z.object({ type: z.string().max(40), name: z.string().trim().min(2).max(80), config: z.record(z.unknown()).optional(), connectionString: z.string().max(1000).optional() }), req.body);
+  const config = body.config ?? (body.connectionString ? { connectionString: body.connectionString } : {});
+  res.status(201).json(await C.createConnector(ctxOf(req), { type: body.type, name: body.name, config }));
+}));
+platformRouter.post('/connectors/:id/describe', requirePermission('connectors.manage'), asyncHandler(async (req, res) => {
+  const body = parse(z.object({ object: z.string().min(1).max(1024) }), req.body);
+  res.json(await C.describeObject(ctxOf(req), param(req, 'id'), body.object));
+}));
+platformRouter.post('/connectors/:id/preview', requirePermission('connectors.manage'), requirePermission('sources.real.preview'), asyncHandler(async (req, res) => {
+  const body = parse(z.object({ object: z.string().min(1).max(1024), offset: z.number().int().min(0).max(10_000_000).default(0), limit: z.number().int().min(1).max(100).default(25) }), req.body);
+  res.json(await C.previewObject(ctxOf(req), param(req, 'id'), body.object, body.offset, body.limit));
 }));
 platformRouter.post('/connectors/:id/test', requirePermission('connectors.manage'), asyncHandler(async (req, res) => res.json(await C.checkConnector(ctxOf(req), param(req, 'id')))));
 platformRouter.post('/connectors/:id/import', requirePermission('connectors.manage'), asyncHandler(async (req, res) => {
-  const body = parse(z.object({ sourceId: z.string().uuid(), tables: z.array(z.string().max(130)).min(1).max(50) }), req.body);
+  const body = parse(z.object({ sourceId: z.string().uuid(), tables: z.array(z.string().max(1024)).min(1).max(50) }), req.body);
   res.status(202).json(await C.importFromConnector(ctxOf(req), param(req, 'id'), body.sourceId, body.tables));
 }));
 platformRouter.delete('/connectors/:id', requirePermission('connectors.manage'), asyncHandler(async (req, res) => {

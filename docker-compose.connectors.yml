@@ -1,0 +1,31 @@
+# Local servers and official emulators used by the connector integration tests:
+#   docker compose -f docker-compose.connectors.yml up -d
+#   npm run test:connectors --workspace apps/api
+services:
+  mysql:
+    image: mysql:8.4
+    environment: { MYSQL_ROOT_PASSWORD: rootpw, MYSQL_DATABASE: crm }
+    ports: ['13306:3306']
+  mongo:
+    image: mongo:7
+    ports: ['27018:27017']
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment: { ACCEPT_EULA: 'Y', MSSQL_SA_PASSWORD: 'Str0ng!Passw0rd' }
+    ports: ['11433:1433']
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    environment: { ORACLE_PASSWORD: OraclePw1, APP_USER: crm, APP_USER_PASSWORD: CrmPw123 }
+    ports: ['11521:1521']
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    command: azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck
+    ports: ['10000:10000']
+  gcs:
+    image: fsouza/fake-gcs-server:1
+    command: -scheme http -port 4443 -external-url http://localhost:4443
+    ports: ['4443:4443']
+  s3:
+    image: localstack/localstack:3.8
+    environment: { SERVICES: s3 }
+    ports: ['14566:4566']

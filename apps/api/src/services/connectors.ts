@@ -1,131 +1,146 @@
-import pg from 'pg';
 import { prisma, Prisma } from '../lib/prisma.js';
 import { decryptSecret, encryptSecret } from '../lib/crypto.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { audit } from '../modules/audit.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue } from '../modules/jobs/queue.js';
-import { assertOutboundHost, blocksPrivateTargets } from '../lib/net.js';
 import { isFeatureEnabled } from '../modules/platform/events.js';
+import { assertTargets, cleanConfig, describeDriver, driverFor, DRIVERS, publicConfig, secretKeys, UNVERIFIED_FLAG } from '../connectors/registry.js';
+import { redact, type ConnectorConfig, type RemoteObject } from '../connectors/types.js';
 import type { ParsedTable } from './firewall.js';
 
+export const MAX_CONNECTOR_ROWS = 250_000;
+const BATCH = 5000;
+
 /**
- * Connector registry. Only connectors with a working implementation are
- * exposed; others stay behind feature flags until they are built.
+ * Connector catalog. Verified connectors pass integration tests against real servers or the
+ * vendors' official emulators. Unverified connectors are listed with their prerequisites but can
+ * only be created after an administrator enables the "connectors.unverified" feature flag.
  */
-export const CONNECTOR_TYPES = [
-  { type: 'POSTGRES', name: 'PostgreSQL', flag: null, description: 'Read tables from a PostgreSQL database using a read-only connection string.' },
-] as const;
-
-const IDENT = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
-const MAX_CONNECTOR_ROWS = 250_000;
-
 export async function availableConnectorTypes(orgId: string) {
-  const out = [];
-  for (const c of CONNECTOR_TYPES) if (!c.flag || (await isFeatureEnabled(orgId, c.flag))) out.push(c);
-  void orgId;
-  return out;
+  const unverifiedEnabled = await isFeatureEnabled(orgId, UNVERIFIED_FLAG);
+  return DRIVERS.map((d) => ({ ...describeDriver(d), flag: d.verification === 'VERIFIED' ? null : UNVERIFIED_FLAG, available: d.verification === 'VERIFIED' || unverifiedEnabled }));
 }
 
-/** Connector hosts are checked against the outbound policy before every connection. */
-export async function assertConnectorTarget(connectionString: string) {
-  if (!blocksPrivateTargets()) return;
-  let u: URL;
-  try {
-    u = new URL(connectionString);
-  } catch {
-    throw badRequest('Use a single-host postgresql:// connection string.');
-  }
-  if (u.searchParams.has('host') || u.searchParams.has('hostaddr')) throw badRequest('Set the host in the connection string itself, not with a host parameter.');
-  await assertOutboundHost(u.hostname, 'Connector hosts');
+export function decodeConfig(credentialsEnc: string): ConnectorConfig {
+  const raw = decryptSecret(credentialsEnc);
+  return raw.startsWith('{') ? (JSON.parse(raw) as ConnectorConfig) : { connectionString: raw };
 }
 
-function pgClient(connectionString: string) {
-  return new pg.Client({ connectionString, statement_timeout: 60_000, query_timeout: 60_000, connectionTimeoutMillis: 10_000 });
-}
-
-export async function testPostgres(connectionString: string) {
-  await assertConnectorTarget(connectionString);
-  const client = pgClient(connectionString);
-  try {
-    await client.connect();
-    const r = await client.query<{ table_schema: string; table_name: string }>(
-      `SELECT table_schema, table_name FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1,2 LIMIT 500`,
-    );
-    return r.rows.map((x) => `${x.table_schema}.${x.table_name}`);
-  } finally {
-    await client.end().catch(() => undefined);
-  }
-}
-
-export async function readPostgresTables(connectionString: string, tables: string[]): Promise<ParsedTable[]> {
-  await assertConnectorTarget(connectionString);
-  const client = pgClient(connectionString);
-  await client.connect();
-  try {
-    await client.query('SET TRANSACTION READ ONLY').catch(() => undefined);
-    const out: ParsedTable[] = [];
-    for (const full of tables) {
-      const [schema, name] = full.includes('.') ? full.split('.') : ['public', full];
-      if (!IDENT.test(schema!) || !IDENT.test(name!)) throw badRequest(`"${full}" is not a valid table name.`);
-      const r = await client.query(`SELECT * FROM "${schema}"."${name}" LIMIT ${MAX_CONNECTOR_ROWS}`);
-      out.push({ name: name!.toLowerCase(), rows: r.rows.map((row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, v instanceof Date ? v.toISOString() : v]))) });
-    }
-    return out;
-  } finally {
-    await client.end().catch(() => undefined);
-  }
-}
+const safeError = (type: string, cfg: ConnectorConfig, err: unknown) => redact((err as Error)?.message ?? String(err), cfg, secretKeys(driverFor(type)));
 
 export async function listConnectors(ctx: RequestContext) {
   const rows = await prisma.connectorAccount.findMany({ where: { orgId: ctx.orgId, deletedAt: null }, orderBy: { createdAt: 'desc' }, include: { syncs: { orderBy: { startedAt: 'desc' }, take: 5 } } });
-  return rows.map(({ credentialsEnc, ...r }) => ({ ...r, hasCredentials: !!credentialsEnc }));
+  return rows.map(({ credentialsEnc, ...r }) => ({ ...r, hasCredentials: !!credentialsEnc, verification: DRIVERS.find((d) => d.type === r.type)?.verification ?? 'UNVERIFIED' }));
 }
 
-export async function createConnector(ctx: RequestContext, input: { type: string; name: string; connectionString: string }) {
+export async function createConnector(ctx: RequestContext, input: { type: string; name: string; config: Record<string, unknown> }) {
   const types = await availableConnectorTypes(ctx.orgId);
-  if (!types.some((t) => t.type === input.type)) throw badRequest('This connector type is not available for your organization.');
-  if (!/^postgres(ql)?:\/\//.test(input.connectionString)) throw badRequest('Use a postgresql:// connection string.');
-  await assertConnectorTarget(input.connectionString);
-  const c = await prisma.connectorAccount.create({ data: { orgId: ctx.orgId, type: input.type, name: input.name, credentialsEnc: encryptSecret(input.connectionString), createdById: ctx.userId } });
-  await audit(ctx, { action: 'connector.created', resourceType: 'connector', resourceId: c.id, summary: `Added ${input.type} connector "${input.name}"` });
+  const t = types.find((x) => x.type === input.type);
+  if (!t) throw badRequest('Unknown connector type.');
+  if (!t.available) throw badRequest(`${t.name} is not verified. An administrator must enable unverified connectors before it can be used.`);
+  const driver = driverFor(input.type);
+  const cfg = cleanConfig(driver, input.config);
+  await assertTargets(driver, cfg);
+  const c = await prisma.connectorAccount.create({
+    data: { orgId: ctx.orgId, type: input.type, name: input.name, credentialsEnc: encryptSecret(JSON.stringify(cfg)), config: { settings: publicConfig(driver, cfg) } as Prisma.InputJsonValue, createdById: ctx.userId },
+  });
+  await audit(ctx, { action: 'connector.created', resourceType: 'connector', resourceId: c.id, summary: `Added ${driver.name} connector "${input.name}"` });
   return { id: c.id, name: c.name, type: c.type, status: c.status };
 }
 
 async function getConnector(ctx: RequestContext, id: string) {
   const c = await prisma.connectorAccount.findFirst({ where: { id, orgId: ctx.orgId, deletedAt: null } });
   if (!c?.credentialsEnc) throw notFound('Connector');
-  return c;
+  const driver = driverFor(c.type);
+  const cfg = decodeConfig(c.credentialsEnc);
+  await assertTargets(driver, cfg);
+  return { c, driver, cfg };
 }
 
 export async function checkConnector(ctx: RequestContext, id: string) {
-  const c = await getConnector(ctx, id);
+  const { c, driver, cfg } = await getConnector(ctx, id);
+  const settings = (c.config as { settings?: unknown })?.settings ?? publicConfig(driver, cfg);
   try {
-    const tables = await testPostgres(decryptSecret(c.credentialsEnc!));
-    await prisma.connectorAccount.update({ where: { id }, data: { status: 'HEALTHY', lastHealthAt: new Date(), lastError: null, config: { tables } as Prisma.InputJsonValue } });
-    return { ok: true, tables };
+    const { objects } = await driver.test(cfg);
+    await prisma.connectorAccount.update({ where: { id }, data: { status: 'HEALTHY', lastHealthAt: new Date(), lastError: null, config: { settings, objects } as unknown as Prisma.InputJsonValue } });
+    await audit(ctx, { action: 'connector.tested', resourceType: 'connector', resourceId: id, summary: `Connection test for "${c.name}" succeeded (${objects.length} objects found)` });
+    return { ok: true, objects, tables: objects.map((o) => o.name) };
   } catch (err) {
-    const message = (err as Error).message.replace(/postgres(ql)?:\/\/[^\s]+/g, '[connection string]').slice(0, 300);
+    const message = safeError(c.type, cfg, err);
     await prisma.connectorAccount.update({ where: { id }, data: { status: 'ERROR', lastHealthAt: new Date(), lastError: message } });
-    return { ok: false, error: `Could not connect: ${message}` };
+    await audit(ctx, { action: 'connector.test_failed', resourceType: 'connector', resourceId: id, summary: `Connection test for "${c.name}" failed` });
+    return { ok: false, error: `Could not connect: ${message}`, objects: [] as RemoteObject[], tables: [] as string[] };
   }
 }
 
+export async function describeObject(ctx: RequestContext, id: string, object: string) {
+  const { c, driver, cfg } = await getConnector(ctx, id);
+  try {
+    return { columns: await driver.describe(cfg, object) };
+  } catch (err) {
+    throw badRequest(`Could not read the schema: ${safeError(c.type, cfg, err)}`);
+  }
+}
+
+/** Paged preview of raw source rows. Restricted to roles allowed to see real data; content is never logged. */
+export async function previewObject(ctx: RequestContext, id: string, object: string, offset: number, limit: number) {
+  const { c, driver, cfg } = await getConnector(ctx, id);
+  try {
+    const page = await driver.readPage(cfg, object, { limit: Math.min(Math.max(limit, 1), 100), offset: Math.max(offset, 0) });
+    await audit(ctx, { action: 'connector.previewed', resourceType: 'connector', resourceId: id, summary: `Previewed ${page.rows.length} source rows of "${object}" from "${c.name}"` });
+    return { ...page, offset };
+  } catch (err) {
+    throw badRequest(`Could not read rows: ${safeError(c.type, cfg, err)}`);
+  }
+}
+
+/** Reads whole objects in pages for Firewall ingestion. Stops at MAX_CONNECTOR_ROWS per object and honours cancellation between pages. */
+export async function readConnectorTables(
+  connector: { type: string; credentialsEnc: string | null },
+  objects: string[],
+  opts: { onProgress?: (msg: string) => Promise<void>; shouldStop?: () => Promise<boolean> } = {},
+): Promise<ParsedTable[]> {
+  if (!connector.credentialsEnc) throw new Error('The connector has no stored credentials.');
+  const driver = driverFor(connector.type);
+  const cfg = decodeConfig(connector.credentialsEnc);
+  await assertTargets(driver, cfg);
+  const out: ParsedTable[] = [];
+  try {
+    for (const object of objects) {
+      const rows: Record<string, unknown>[] = [];
+      for (let offset = 0; offset < MAX_CONNECTOR_ROWS; offset += BATCH) {
+        if (opts.shouldStop && (await opts.shouldStop())) throw new Error('The import was cancelled.');
+        const page = await driver.readPage(cfg, object, { limit: Math.min(BATCH, MAX_CONNECTOR_ROWS - offset), offset });
+        rows.push(...page.rows);
+        if (!page.hasMore) break;
+      }
+      const base = object.split('/').pop()!.split('.').filter(Boolean);
+      const name = (driver.category === 'OBJECT_STORAGE' ? base.slice(0, -1).join('_') || base[0]! : base.pop()!).toLowerCase();
+      out.push({ name, rows });
+      await opts.onProgress?.(`Read ${rows.length} rows from ${object}${rows.length >= MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
+    }
+  } catch (err) {
+    throw new Error(safeError(connector.type, cfg, err));
+  }
+  return out;
+}
+
 export async function importFromConnector(ctx: RequestContext, id: string, sourceId: string, tables: string[]) {
-  const c = await getConnector(ctx, id);
-  await assertConnectorTarget(decryptSecret(c.credentialsEnc!));
+  const { c } = await getConnector(ctx, id);
   const source = await prisma.dataSource.findFirst({ where: { id: sourceId, orgId: ctx.orgId, deletedAt: null } });
   if (!source) throw notFound('Data source');
   if (!tables.length || tables.length > 50) throw badRequest('Choose between 1 and 50 tables.');
   const sync = await prisma.connectorSync.create({ data: { orgId: ctx.orgId, connectorAccountId: c.id, status: 'RUNNING' } });
   await prisma.dataSource.update({ where: { id: sourceId }, data: { status: 'INGESTING', kind: 'CONNECTOR' } });
   const job = await enqueue({ orgId: ctx.orgId, type: 'FIREWALL_INGEST', payload: { sourceId, connectorId: c.id, syncId: sync.id, tables }, resourceType: 'data_source', resourceId: sourceId, createdById: ctx.userId });
-  await audit(ctx, { action: 'connector.import', resourceType: 'connector', resourceId: c.id, summary: `Importing ${tables.length} table(s) from "${c.name}" into "${source.name}"`, jobId: job.id });
+  await audit(ctx, { action: 'connector.import', resourceType: 'connector', resourceId: c.id, summary: `Importing ${tables.length} object(s) from "${c.name}" into "${source.name}"`, jobId: job.id });
   return { job, syncId: sync.id };
 }
 
 export async function deleteConnector(ctx: RequestContext, id: string) {
-  const c = await getConnector(ctx, id);
+  const c = await prisma.connectorAccount.findFirst({ where: { id, orgId: ctx.orgId, deletedAt: null } });
+  if (!c) throw notFound('Connector');
   await prisma.connectorAccount.update({ where: { id }, data: { deletedAt: new Date(), credentialsEnc: null } });
   await audit(ctx, { action: 'connector.deleted', resourceType: 'connector', resourceId: id, summary: `Removed connector "${c.name}" and its stored credentials` });
 }

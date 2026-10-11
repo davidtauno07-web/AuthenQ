@@ -9,12 +9,13 @@ import { audit } from '../modules/audit.js';
 import type { RequestContext } from '../modules/context.js';
 import { enqueue, type JobReporter } from '../modules/jobs/queue.js';
 import { emit, notifyRole, recordUsage } from '../modules/platform/events.js';
+import Database from 'better-sqlite3';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const MAX_ROWS = 1_000_000;
 const MAX_COLUMNS = 500;
 const SAMPLE_SIZE = 2000;
-const ALLOWED_EXT = ['csv', 'tsv', 'xlsx', 'json', 'jsonl'];
+const ALLOWED_EXT = ['csv', 'tsv', 'xlsx', 'json', 'jsonl', 'sqlite', 'sqlite3', 'db'];
 const VALID_DECISIONS = ['REPLACE', 'GENERALIZE', 'KEEP', 'DROP', 'SCRUB_TEXT', 'KEY'] as const;
 export type Decision = (typeof VALID_DECISIONS)[number];
 
@@ -55,10 +56,30 @@ function normalizeRows(rows: Record<string, unknown>[]): Record<string, unknown>
 }
 
 /** Parses an uploaded file into tables. Rejects unknown formats and binary content. */
+const SQLITE_MAGIC = 'SQLite format 3\u0000';
+const SQLITE_MAX_ROWS = 250_000;
+
+/** Reads every user table from a SQLite database file, opened read-only from memory (no file written to disk). */
+export function parseSqlite(buffer: Buffer): ParsedTable[] {
+  if (buffer.subarray(0, 16).toString('latin1') !== SQLITE_MAGIC) throw badRequest('The file is not a valid SQLite database.');
+  const db = new Database(buffer, { readonly: true });
+  try {
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[];
+    if (!names.length) throw badRequest('The SQLite database has no tables.');
+    return names.slice(0, 50).map(({ name }) => {
+      const rows = db.prepare(`SELECT * FROM "${name.replace(/"/g, '""')}" LIMIT ${SQLITE_MAX_ROWS}`).all() as Record<string, unknown>[];
+      return { name: cleanName(name, 'table'), rows: rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, Buffer.isBuffer(v) ? `[binary ${v.length} bytes]` : typeof v === 'bigint' ? v.toString() : v]))) };
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function parseUpload(fileName: string, buffer: Buffer, tableName?: string): Promise<ParsedTable[]> {
   const ext = fileName.split('.').pop()?.toLowerCase() ?? '';
-  if (!ALLOWED_EXT.includes(ext)) throw badRequest(`".${ext}" files are not supported. Upload CSV, TSV, XLSX, JSON or JSONL.`);
+  if (!ALLOWED_EXT.includes(ext)) throw badRequest(`".${ext}" files are not supported. Upload CSV, TSV, XLSX, JSON, JSONL or SQLite.`);
   if (buffer.length > MAX_UPLOAD_BYTES) throw badRequest('The file is larger than 50 MB. Use a connector for larger sources.');
+  if (ext === 'sqlite' || ext === 'sqlite3' || ext === 'db') return parseSqlite(buffer);
   const base = cleanName(tableName ?? fileName.replace(/\.[^.]+$/, ''), 'table');
   if (ext === 'xlsx') {
     if (buffer.subarray(0, 2).toString('latin1') !== 'PK') throw badRequest('The file is not a valid XLSX workbook.');
@@ -259,11 +280,10 @@ export async function runIngestJob(
   }
   let tables: ParsedTable[];
   if (payload.connectorId) {
-    const { readPostgresTables } = await import('./connectors.js');
-    const { decryptSecret } = await import('../lib/crypto.js');
+    const { readConnectorTables } = await import('./connectors.js');
     const c = await prisma.connectorAccount.findFirstOrThrow({ where: { id: payload.connectorId, orgId } });
     try {
-      tables = (await readPostgresTables(decryptSecret(c.credentialsEnc!), payload.tables ?? [])).map((t) => ({ name: t.name, rows: normalizeRows(t.rows) }));
+      tables = (await readConnectorTables(c, payload.tables ?? [], { onProgress: (m) => reporter.event(m) })).map((t) => ({ name: t.name, rows: normalizeRows(t.rows) }));
       await prisma.connectorSync.update({ where: { id: payload.syncId! }, data: { status: 'COMPLETED', recordsRead: tables.reduce((a, t) => a + t.rows.length, 0), finishedAt: new Date() } });
       await prisma.connectorAccount.update({ where: { id: c.id }, data: { lastSyncAt: new Date() } });
     } catch (err) {

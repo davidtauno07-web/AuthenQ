@@ -188,55 +188,113 @@ function Members() {
   );
 }
 
-interface ConnectorRes { types: { type: string; name: string; description: string; flag: string | null; available?: boolean }[]; connectors: { id: string; type: string; name: string; status: string; lastCheckedAt: string | null; lastError: string | null; hasCredentials: boolean; createdAt: string }[] }
+interface FieldSpec { key: string; label: string; type: 'text' | 'password' | 'number' | 'boolean' | 'textarea'; secret?: boolean; required?: boolean; placeholder?: string; help?: string }
+interface ConnectorType { type: string; name: string; category: 'DATABASE' | 'WAREHOUSE' | 'OBJECT_STORAGE'; description: string; verification: 'VERIFIED' | 'UNVERIFIED'; verifiedWith: string | null; prerequisites: string; supportsIncremental: boolean; fields: FieldSpec[]; flag: string | null; available: boolean }
+interface RemoteObject { name: string; kind: string; rowEstimate: number | null; sizeBytes?: number | null }
+interface ConnectorRes { types: ConnectorType[]; connectors: { id: string; type: string; name: string; status: string; lastHealthAt: string | null; lastError: string | null; hasCredentials: boolean; verification: string; createdAt: string }[] }
+interface PreviewRes { rows: Record<string, unknown>[]; columns: { name: string; type: string }[]; hasMore: boolean; offset: number }
+
+const CATEGORY: Record<ConnectorType['category'], string> = { DATABASE: 'Databases', WAREHOUSE: 'Data warehouses', OBJECT_STORAGE: 'Object storage and files' };
+
+function VerificationBadge({ t }: { t: Pick<ConnectorType, 'verification' | 'verifiedWith'> }) {
+  return t.verification === 'VERIFIED' ? <Badge tone="soft">Verified{t.verifiedWith ? ` · ${t.verifiedWith}` : ''}</Badge> : <Badge tone="dashed">Not verified · requires configuration</Badge>;
+}
 
 function Connectors() {
   const { can } = useAuth();
   const q = useApi<ConnectorRes>('/connectors');
   const sources = useApi<{ id: string; name: string }[]>('/sources');
-  const [form, setForm] = useState({ type: 'POSTGRES', name: '', connectionString: '' });
-  const [tables, setTables] = useState<{ id: string; list: string[] } | null>(null);
+  const [type, setType] = useState('POSTGRES');
+  const [name, setName] = useState('');
+  const [values, setValues] = useState<Record<string, string | boolean>>({});
+  const [objects, setObjects] = useState<{ id: string; list: RemoteObject[] } | null>(null);
   const [pick, setPick] = useState<string[]>([]);
   const [sourceId, setSourceId] = useState('');
-  const create = useAction(() => api.post('/connectors', form), { success: 'Connector saved. Credentials are encrypted at rest.', invalidate: ['/connectors'], onSuccess: () => setForm({ ...form, name: '', connectionString: '' }) });
-  const test = useAction((id: string) => api.post<{ ok: boolean; tables: string[] }>(`/connectors/${id}/test`), { invalidate: ['/connectors'], onSuccess: (r, id) => { setTables({ id, list: r.tables ?? [] }); setPick([]); } });
-  const imp = useAction(() => api.post(`/connectors/${tables!.id}/import`, { sourceId, tables: pick }), { success: 'Import started. The source page shows progress.', onSuccess: () => setTables(null) });
-  const del = useAction((id: string) => api.del(`/connectors/${id}`), { success: 'Connector removed.', invalidate: ['/connectors'] });
+  const [schema, setSchema] = useState<{ object: string; columns: { name: string; type: string }[] } | null>(null);
+  const [preview, setPreview] = useState<{ object: string; page: PreviewRes } | null>(null);
+  const create = useAction(() => api.post('/connectors', { type, name, config: values }), { success: 'Connector saved. Credentials are encrypted at rest.', invalidate: ['/connectors'], onSuccess: () => { setName(''); setValues({}); } });
+  const test = useAction((id: string) => api.post<{ ok: boolean; error?: string; objects: RemoteObject[] }>(`/connectors/${id}/test`), { invalidate: ['/connectors'], onSuccess: (r, id) => { if (r.ok) { setObjects({ id, list: r.objects }); setPick([]); } } });
+  const describe = useAction((object: string) => api.post<{ columns: { name: string; type: string }[] }>(`/connectors/${objects!.id}/describe`, { object }), { onSuccess: (r, object) => setSchema({ object, columns: r.columns }) });
+  const peek = useAction(({ object, offset }: { object: string; offset: number }) => api.post<PreviewRes>(`/connectors/${objects!.id}/preview`, { object, offset, limit: 25 }), { onSuccess: (page, v) => setPreview({ object: v.object, page }) });
+  const imp = useAction(() => api.post(`/connectors/${objects!.id}/import`, { sourceId, tables: pick }), { success: 'Import started. The source page shows progress.', onSuccess: () => setObjects(null) });
+  const del = useAction((id: string) => api.del(`/connectors/${id}`), { success: 'Connector removed and its credentials deleted.', invalidate: ['/connectors'] });
   if (q.isLoading) return <Loading />;
   if (q.error) return <ErrorBox error={q.error} />;
-  const avail = q.data!.types.filter((t) => t.available !== false);
+  const types = q.data!.types;
+  const avail = types.filter((t) => t.available);
+  const current = types.find((t) => t.type === type) ?? avail[0];
+  const missing = current ? current.fields.some((f) => f.required && !values[f.key]) : true;
+  const lastResult = test.data && !test.data.ok ? test.data.error : null;
   return (
     <div className="stack lg">
-      <Panel title="Available connector types">
-        <table>
-          <tbody>{q.data!.types.map((t) => <tr key={t.type}><td><strong>{t.name}</strong><div className="small muted">{t.description}</div></td><td>{t.available === false ? <Badge tone="dashed">Requires feature flag {t.flag}</Badge> : <Badge tone="soft">Available</Badge>}</td></tr>)}</tbody>
-        </table>
-      </Panel>
-      {can('connectors.manage') && avail.length ? (
-        <Panel title="Add a connector">
-          <div className="row wrap" style={{ alignItems: 'flex-end' }}>
-            <Field label="Type"><select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} style={{ width: 160 }}>{avail.map((t) => <option key={t.type} value={t.type}>{t.name}</option>)}</select></Field>
-            <Field label="Name"><input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
-            <Field label="Connection string" hint="Use a read-only database user."><input type="password" autoComplete="off" value={form.connectionString} onChange={(e) => setForm({ ...form, connectionString: e.target.value })} style={{ width: 340 }} /></Field>
-            <button className="primary" disabled={form.name.length < 2 || form.connectionString.length < 10} onClick={() => create.mutate(undefined)}>Save</button>
+      <Panel title="Connector catalog">
+        <p className="small muted">Verified connectors pass integration tests against a real server or the vendor's official emulator. Unverified connectors are built on the vendor's official API but have not been run against a live account; they stay disabled until an administrator enables the <code>connectors.unverified</code> feature flag.</p>
+        {(Object.keys(CATEGORY) as ConnectorType['category'][]).map((cat) => (
+          <div key={cat} className="stack sm" style={{ marginTop: 16 }}>
+            <h4>{CATEGORY[cat]}</h4>
+            <table>
+              <tbody>{types.filter((t) => t.category === cat).map((t) => <tr key={t.type}><td style={{ width: '32%' }}><strong>{t.name}</strong><div className="small muted">{t.description}</div></td><td className="small muted">{t.prerequisites}</td><td style={{ textAlign: 'right' }}><VerificationBadge t={t} />{!t.available ? <div className="small muted">Disabled</div> : null}</td></tr>)}</tbody>
+            </table>
           </div>
+        ))}
+        <p className="small muted" style={{ marginTop: 12 }}>CSV, TSV, JSON, JSONL, XLSX and SQLite files can also be uploaded directly on a data source.</p>
+      </Panel>
+      {can('connectors.manage') && current ? (
+        <Panel title="Add a connector">
+          <form className="stack" onSubmit={(e) => { e.preventDefault(); if (!missing && name.length >= 2) create.mutate(undefined); }}>
+            <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+              <Field label="Type"><select value={current.type} onChange={(e) => { setType(e.target.value); setValues({}); }} style={{ width: 240 }}>{avail.map((t) => <option key={t.type} value={t.type}>{t.name}{t.verification === 'UNVERIFIED' ? ' (not verified)' : ''}</option>)}</select></Field>
+              <Field label="Name"><input value={name} onChange={(e) => setName(e.target.value)} placeholder="CRM replica" /></Field>
+            </div>
+            <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+              {current.fields.map((f) => f.type === 'boolean' ? (
+                <label key={f.key} className="check"><input type="checkbox" checked={values[f.key] === true} onChange={(e) => setValues({ ...values, [f.key]: e.target.checked })} />{f.label}</label>
+              ) : (
+                <Field key={f.key} label={`${f.label}${f.required ? '' : ' (optional)'}`} hint={f.help}>
+                  {f.type === 'textarea'
+                    ? <textarea rows={4} autoComplete="off" spellCheck={false} value={String(values[f.key] ?? '')} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} style={{ width: 340 }} />
+                    : <input type={f.type === 'password' ? 'password' : f.type === 'number' ? 'number' : 'text'} autoComplete="off" placeholder={f.placeholder} value={String(values[f.key] ?? '')} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} style={{ width: f.secret ? 340 : 220 }} />}
+                </Field>
+              ))}
+            </div>
+            <p className="small muted">Use a read-only account. Secret fields are encrypted at rest and never shown again. {current.verification === 'UNVERIFIED' ? 'This connector has not been verified against a live service.' : ''}</p>
+            <div><button className="primary" type="submit" disabled={name.length < 2 || missing || create.isPending}>Save connector</button></div>
+            <ErrorBox error={create.error} />
+          </form>
         </Panel>
       ) : null}
       <Panel title="Connectors" flat>
         {!q.data!.connectors.length ? <p className="muted" style={{ padding: 12 }}>No connectors configured.</p> : (
           <table>
             <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Last checked</th><th /></tr></thead>
-            <tbody>{q.data!.connectors.map((c) => <tr key={c.id}><td>{c.name}{c.lastError ? <div className="small muted">{c.lastError}</div> : null}</td><td>{c.type}</td><td><StatusBadge status={c.status} /></td><td className="small muted">{dateTime(c.lastCheckedAt)}</td><td>{can('connectors.manage') ? <div className="row"><button className="sm" onClick={() => test.mutate(c.id)}>Test & list tables</button><button className="sm ghost" onClick={() => del.mutate(c.id)}>Remove</button></div> : null}</td></tr>)}</tbody>
+            <tbody>{q.data!.connectors.map((c) => <tr key={c.id}><td>{c.name}{c.lastError ? <div className="small muted">{c.lastError}</div> : null}</td><td>{types.find((t) => t.type === c.type)?.name ?? c.type}{c.verification !== 'VERIFIED' ? <div><Badge tone="dashed">Not verified</Badge></div> : null}</td><td><StatusBadge status={c.status} /></td><td className="small muted">{dateTime(c.lastHealthAt)}</td><td>{can('connectors.manage') ? <div className="row"><button className="sm" disabled={test.isPending} onClick={() => test.mutate(c.id)}>{test.isPending && test.variables === c.id ? 'Testing…' : 'Test & browse'}</button><button className="sm ghost" onClick={() => { if (confirm(`Remove "${c.name}" and delete its stored credentials?`)) del.mutate(c.id); }}>Remove</button></div> : null}</td></tr>)}</tbody>
           </table>
         )}
       </Panel>
       <ErrorBox error={test.error} title="Connection test failed" />
-      {tables ? (
-        <Modal title="Import tables" onClose={() => setTables(null)} footer={<><button onClick={() => setTables(null)}>Cancel</button><button className="primary" disabled={!sourceId || !pick.length} onClick={() => imp.mutate(undefined)}>Import</button></>}>
+      {lastResult ? <div className="error-box" role="alert"><strong>Connection test failed</strong><p>{lastResult}</p></div> : null}
+      {objects ? (
+        <Modal title="Browse and import" onClose={() => { setObjects(null); setSchema(null); setPreview(null); }} footer={<><button onClick={() => setObjects(null)}>Cancel</button><button className="primary" disabled={!sourceId || !pick.length || imp.isPending} onClick={() => imp.mutate(undefined)}>Import {pick.length || ''}</button></>}>
           <div className="stack">
             <Field label="Into data source"><select value={sourceId} onChange={(e) => setSourceId(e.target.value)}><option value="">Choose…</option>{sources.data?.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
-            <fieldset><legend>Tables ({tables.list.length})</legend><div className="stack" style={{ gap: 4, maxHeight: 300, overflow: 'auto' }}>{tables.list.map((t) => <label key={t} className="check"><input type="checkbox" checked={pick.includes(t)} onChange={() => setPick(pick.includes(t) ? pick.filter((x) => x !== t) : [...pick, t])} /><code>{t}</code></label>)}</div></fieldset>
-            <ErrorBox error={imp.error} />
+            <fieldset><legend>Objects ({objects.list.length})</legend>
+              {!objects.list.length ? <p className="small muted">The connection works but no importable tables or supported files were found.</p> : null}
+              <div className="stack" style={{ gap: 4, maxHeight: 260, overflow: 'auto' }}>{objects.list.map((o) => (
+                <div key={o.name} className="row" style={{ justifyContent: 'space-between' }}>
+                  <label className="check"><input type="checkbox" checked={pick.includes(o.name)} disabled={!pick.includes(o.name) && pick.length >= 50} onChange={() => setPick(pick.includes(o.name) ? pick.filter((x) => x !== o.name) : [...pick, o.name])} /><code>{o.name}</code><span className="small muted">{o.rowEstimate !== null ? ` ~${num(o.rowEstimate)} rows` : o.sizeBytes ? ` ${num(Math.ceil(o.sizeBytes / 1024))} KB` : ''}</span></label>
+                  <div className="row"><button className="sm ghost" onClick={() => describe.mutate(o.name)}>Schema</button>{can('sources.real.preview') ? <button className="sm ghost" onClick={() => peek.mutate({ object: o.name, offset: 0 })}>Preview</button> : null}</div>
+                </div>
+              ))}</div>
+            </fieldset>
+            <ErrorBox error={describe.error ?? peek.error ?? imp.error} />
+            {schema ? <div><h4>Schema of <code>{schema.object}</code></h4><table><tbody>{schema.columns.map((c) => <tr key={c.name}><td><code>{c.name}</code></td><td className="small muted">{c.type}</td></tr>)}</tbody></table></div> : null}
+            {preview ? (
+              <div className="stack sm">
+                <h4>Source preview of <code>{preview.object}</code> <span className="small muted">rows {preview.page.offset + 1}–{preview.page.offset + preview.page.rows.length} · real data, visible to your role only, access is logged</span></h4>
+                <div style={{ overflow: 'auto', maxHeight: 260 }}><table><thead><tr>{Object.keys(preview.page.rows[0] ?? {}).map((k) => <th key={k}>{k}</th>)}</tr></thead><tbody>{preview.page.rows.map((r, i) => <tr key={i}>{Object.values(r).map((v, j) => <td key={j} className="small">{v === null ? '' : String(v)}</td>)}</tr>)}</tbody></table></div>
+                <div className="row"><button className="sm" disabled={preview.page.offset === 0} onClick={() => peek.mutate({ object: preview.object, offset: Math.max(0, preview.page.offset - 25) })}>Previous</button><button className="sm" disabled={!preview.page.hasMore} onClick={() => peek.mutate({ object: preview.object, offset: preview.page.offset + 25 })}>Next</button></div>
+              </div>
+            ) : null}
           </div>
         </Modal>
       ) : null}
