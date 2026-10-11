@@ -99,7 +99,7 @@ export interface ImportIssue { row: number; taskId: string | null; problem: stri
 
 /**
  * Validates labels from an outside tool and, unless this is a dry run, imports the valid ones.
- * Labels on records that already have a different human label are kept as conflicts for review.
+ * Labels on records that already have a different human label are kept, and the record is flagged for a project manager.
  */
 export async function importExternalLabels(ctx: RequestContext, projectId: string, input: { content: string; filename: string; dryRun: boolean; acceptErrors?: boolean }) {
   const p = await getProjectOrThrow(ctx, projectId);
@@ -132,7 +132,7 @@ export async function importExternalLabels(ctx: RequestContext, projectId: strin
     if (task.gold) return errors.push({ row, taskId, problem: task.gold.split === 'LOCKED_TEST' ? 'Locked test records cannot be labeled outside AuthenQ.' : 'Gold records must be labeled in AuthenQ.' });
     const current = (task.finalLabels as { label?: string } | null)?.label;
     const conflict = !!current && current !== label && ['LABELED', 'DONE', 'IN_REVIEW'].includes(task.status);
-    if (conflict) conflicts.push({ row, taskId, problem: `Already labeled "${current}" in AuthenQ; the file says "${label}". Sent to review.` });
+    if (conflict) conflicts.push({ row, taskId, problem: `Already labeled "${current}" in AuthenQ; the file says "${label}". Flagged for a project manager.` });
     valid.push({ taskId, label, note: r.note ? String(r.note).slice(0, 1000) : undefined, conflict });
   });
   const summary = { rows: rows.length, valid: valid.length, empty, errors, conflicts, imported: 0, batchId: null as string | null };
@@ -146,7 +146,7 @@ export async function importExternalLabels(ctx: RequestContext, projectId: strin
         const l = await tx.label.create({
           data: { orgId: ctx.orgId, projectId, taskId: v.taskId, userId: ctx.userId, values: { label: v.label } as Prisma.InputJsonValue, source: 'EXTERNAL_IMPORT', kind: 'WORK', guidelineVersionId: p.activeGuidelineVersionId, note: `import:${batchId}${v.note ? ` ${v.note}` : ''}`.slice(0, 1000) },
         });
-        await tx.task.update({ where: { id: v.taskId }, data: v.conflict ? { status: 'IN_REVIEW' } : { status: 'LABELED', finalLabels: { label: v.label }, finalSource: 'EXTERNAL_IMPORT', finalLabelId: l.id } });
+        await tx.task.update({ where: { id: v.taskId }, data: v.conflict ? { status: 'FLAGGED' } : { status: 'LABELED', finalLabels: { label: v.label }, finalSource: 'EXTERNAL_IMPORT', finalLabelId: l.id } });
       }
       await audit(ctx, { action: 'labeling.external_import', resourceType: 'label_project', resourceId: projectId, summary: `Imported ${valid.length} external label(s) from "${input.filename.slice(0, 120)}" (${conflicts.length} conflict(s), ${errors.length} rejected row(s))`, details: { batchId, errors: errors.length, conflicts: conflicts.length } }, tx);
     },

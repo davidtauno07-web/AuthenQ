@@ -487,7 +487,7 @@ function ExternalLabeling({ projectId }: { projectId: string }) {
           <div className="stack">
             <div className="callout small">
               {preview.imported ? <strong>Imported {num(preview.imported)} labels. </strong> : null}
-              {num(preview.rows)} rows: {num(preview.valid)} valid, {num(preview.empty)} without a label, {num(preview.errors.length)} with problems, {num(preview.conflicts.length)} conflicting with existing labels (these go to review).
+              {num(preview.rows)} rows: {num(preview.valid)} valid, {num(preview.empty)} without a label, {num(preview.errors.length)} with problems, {num(preview.conflicts.length)} conflicting with existing labels (these are flagged for a project manager).
             </div>
             {preview.errors.length || preview.conflicts.length ? (
               <div className="table-wrap" style={{ maxHeight: 240 }}>

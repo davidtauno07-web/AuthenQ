@@ -22,6 +22,6 @@ Validation reports, per row:
 - a label that is not in the project (matching ignores case);
 - a gold or locked test record (gold is labeled in AuthenQ only).
 
-Rows with an empty label are skipped. A label that disagrees with an existing human or reviewed label is a **conflict**: the import keeps it but leaves the current final label unchanged and sends the task to review.
+Rows with an empty label are skipped. A label that disagrees with an existing human or reviewed label is a **conflict**: the import keeps it but leaves the current final label unchanged and flags the task (status `FLAGGED`) so a project manager can resolve it from the grid's Flagged filter.
 
 The import refuses to run if any rows have problems, unless `acceptErrors=true` confirms that only the valid rows should be imported. Imported labels have source `EXTERNAL_IMPORT` and a batch ID in their note, so they appear separately in quality reports and provenance.
