@@ -82,8 +82,11 @@ describe('authentication and sessions', () => {
     expect(user.lockedUntil && user.lockedUntil > new Date()).toBe(true);
   });
   it('does not reveal whether an email exists on password reset', async () => {
+    // Earlier runs within the 15-minute window can leave this IP rate-limited; start from a clean bucket.
+    await prisma.rateLimitBucket.deleteMany({ where: { key: { startsWith: 'forgot:' } } });
     const r1 = await request(app).post('/api/v1/auth/forgot-password').send({ email: `nobody-${run}@security.test` });
     const r2 = await request(app).post('/api/v1/auth/forgot-password').send({ email: `alpha-${run}@security.test` });
+    expect(r1.status).toBeLessThan(400);
     expect(r1.status).toBe(r2.status);
     expect(r1.body).toEqual(r2.body);
   });

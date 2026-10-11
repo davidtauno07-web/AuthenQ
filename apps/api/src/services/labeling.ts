@@ -486,6 +486,25 @@ export async function submitLabel(ctx: RequestContext, projectId: string, input:
   });
 }
 
+export const UNDO_WINDOW_MS = 15 * 60_000;
+
+/** Lets a labeler take back their own most recent label while nobody has acted on it yet. */
+export async function undoLabel(ctx: RequestContext, projectId: string, labelId: string) {
+  await getProjectOrThrow(ctx, projectId);
+  const label = await prisma.label.findFirst({ where: { id: labelId, projectId }, include: { task: true } });
+  if (!label) throw notFound('Label');
+  if (!ctx.userId || label.userId !== ctx.userId) throw forbidden('You can only undo your own labels.');
+  if (label.kind !== 'WORK' || label.source !== 'HUMAN') throw badRequest('Only your own work labels can be undone. Gold and review labels are permanent.');
+  if (Date.now() - label.createdAt.getTime() > UNDO_WINDOW_MS) throw badRequest('Labels can only be undone within 15 minutes. Ask a reviewer to reopen the task instead.');
+  if (label.task.finalLabelId !== label.id || label.task.status !== 'LABELED') throw badRequest('This label has already been reviewed or replaced, so it can no longer be undone.');
+  await prisma.$transaction(async (tx) => {
+    await tx.task.update({ where: { id: label.taskId }, data: { status: 'OPEN', finalLabels: Prisma.DbNull, finalSource: null, finalLabelId: null } });
+    await tx.label.delete({ where: { id: label.id } });
+    await audit(ctx, { action: 'label.undone', resourceType: 'task', resourceId: label.taskId, summary: `Undid label "${(label.values as { label?: string }).label}" on task #${label.task.ordinal}`, details: { labelId: label.id, values: label.values as Prisma.InputJsonValue } }, tx);
+  });
+  return { taskId: label.taskId, status: 'OPEN' };
+}
+
 export async function bulkLabel(ctx: RequestContext, projectId: string, taskIds: string[], label: string) {
   const p = await getProjectOrThrow(ctx, projectId);
   if (!labelsOf(p).some((l) => l.value === label)) throw badRequest(`"${label}" is not a label in this project.`);

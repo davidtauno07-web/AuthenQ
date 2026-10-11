@@ -99,6 +99,7 @@ labelingRouter.post(`${P}/labels`, requirePermission('labeling.label'), asyncHan
   const body = parse(z.object({ taskId: z.string().uuid(), label: z.string(), durationMs: z.number().nonnegative().optional(), note: z.string().max(1000).optional() }), req.body);
   res.status(201).json(await L.submitLabel(ctxOf(req), pid(req), body));
 }));
+labelingRouter.post(`${P}/labels/:labelId/undo`, requirePermission('labeling.label'), asyncHandler(async (req, res) => res.json(await L.undoLabel(ctxOf(req), pid(req), param(req, 'labelId')))));
 labelingRouter.post(`${P}/labels/bulk`, requirePermission('labeling.label'), asyncHandler(async (req, res) => {
   const body = parse(z.object({ taskIds: z.array(z.string().uuid()).min(1).max(500), label: z.string() }), req.body);
   res.json(await L.bulkLabel(ctxOf(req), pid(req), body.taskIds, body.label));

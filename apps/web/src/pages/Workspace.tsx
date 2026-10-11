@@ -55,6 +55,8 @@ function RecordMode({ project: p }: { project: Project }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState('');
   const [showGuide, setShowGuide] = useState(false);
+  const [lastDone, setLastDone] = useState<{ labelId: string; task: TaskItem; label: string } | null>(null);
+  const [doneCount, setDoneCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<ApiError | null>(null);
   const startedAt = useRef(Date.now());
@@ -100,9 +102,12 @@ function RecordMode({ project: p }: { project: Project }) {
     delete drafts[id];
     localStorage.setItem(DRAFT_KEY(p.id), JSON.stringify(drafts));
   };
-  const submit = useAction((v: { taskId: string; label: string; note: string }) => api.post(`/projects/${p.id}/labels`, { taskId: v.taskId, label: v.label, note: v.note || undefined, durationMs: Date.now() - startedAt.current }), {
-    onSuccess: (_r, v) => {
+  const submit = useAction((v: { taskId: string; label: string; note: string }) => api.post<{ id: string }>(`/projects/${p.id}/labels`, { taskId: v.taskId, label: v.label, note: v.note || undefined, durationMs: Date.now() - startedAt.current }), {
+    onSuccess: (r, v) => {
       clearDraft(v.taskId);
+      const t = queue.find((x) => x.id === v.taskId);
+      if (t) setLastDone({ labelId: r.id, task: t, label: v.label });
+      setDoneCount((c) => c + 1);
       setQueue((q) => q.filter((t) => t.id !== v.taskId));
     },
     invalidate: [`/projects/${p.id}`],
@@ -112,6 +117,16 @@ function RecordMode({ project: p }: { project: Project }) {
       toast.show(v.action === 'skip' ? 'Task skipped.' : 'Task flagged for a project manager.');
       setQueue((q) => q.filter((t) => t.id !== v.taskId));
     },
+  });
+  const undo = useAction((v: { labelId: string; task: TaskItem }) => api.post(`/projects/${p.id}/labels/${v.labelId}/undo`), {
+    onSuccess: (_r, v) => {
+      toast.show('Label undone. The task is back in your queue.');
+      setQueue((q) => [v.task, ...q.filter((t) => t.id !== v.task.id)]);
+      setIndex(0);
+      setLastDone(null);
+      setDoneCount((c) => Math.max(0, c - 1));
+    },
+    invalidate: [`/projects/${p.id}`],
   });
   const doSubmit = () => current && selected && !submit.isPending && submit.mutate({ taskId: current.id, label: selected, note });
 
@@ -133,6 +148,7 @@ function RecordMode({ project: p }: { project: Project }) {
       else if (k === keys.skip && current) status.mutate({ taskId: current.id, action: 'skip' });
       else if (k === keys.flag && current) status.mutate({ taskId: current.id, action: 'flag' });
       else if (k === keys.guide) setShowGuide((g) => !g);
+      else if (k === 'u' && lastDone && !undo.isPending) undo.mutate(lastDone);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -143,7 +159,7 @@ function RecordMode({ project: p }: { project: Project }) {
 
   if (loading) return <Loading rows={6} />;
   if (error) return <ErrorBox error={error} />;
-  if (!current) return <div className="empty"><h3>No open tasks</h3><p>Everything assigned to you is labeled or in review. New tasks appear when a project manager adds data or reopens tasks.</p></div>;
+  if (!current) return <div className="empty"><h3>No open tasks</h3>{lastDone ? <p><button className="sm" onClick={() => undo.mutate(lastDone)}>Undo last label</button></p> : null}<p>Everything assigned to you is labeled or in review. New tasks appear when a project manager adds data or reopens tasks.</p></div>;
   const sug = current.suggestion;
   return (
     <div className="ws">
@@ -153,7 +169,7 @@ function RecordMode({ project: p }: { project: Project }) {
           <StatusBadge status={current.status} />
           {current.gold ? <Badge tone="outline-strong">Gold · {humanize(current.gold.split)}</Badge> : null}
           {current.sliceValue ? <Badge tone="soft">{current.sliceValue}</Badge> : null}
-          <span className="right">{index + 1} of {queue.length} loaded</span>
+          <span className="right">{doneCount ? `${doneCount} labeled this session · ` : ''}{index + 1} of {queue.length} loaded</span>
         </div>
         <article className="record" aria-label="Record">
           {Object.entries(current.fields).map(([k, v]) => (
@@ -216,7 +232,13 @@ function RecordMode({ project: p }: { project: Project }) {
             </div>
           </Panel>
         ) : null}
-        <ErrorBox error={submit.error ?? status.error} />
+        {lastDone ? (
+          <div className="callout small row between">
+            <span>Labeled task #{lastDone.task.ordinal + 1} as <strong>{lastDone.label}</strong>.</span>
+            <button className="sm" disabled={undo.isPending} onClick={() => undo.mutate(lastDone)}>Undo (U)</button>
+          </div>
+        ) : null}
+        <ErrorBox error={submit.error ?? status.error ?? undo.error} />
       </aside>
     </div>
   );
