@@ -374,6 +374,7 @@ export function Quality() {
 }
 
 // ── Exports ─────────────────────────────────────────────────────────────────
+interface Readiness { ready: boolean; records: number; splits: Record<string, number>; checks: { key: string; label: string; passed: boolean; blocking: boolean; explanation: string }[] }
 interface ExportRow { id: string; version: number; format: string; status: string; options: { includeSplits?: string[] }; gate: { ready: boolean; checks?: Check[] } | null; safety: { passed: boolean; explanation: string; realValueMatches?: number; canaryValues?: number } | null; overrideReason: string | null; recordCount: number; checksum: string | null; createdAt: string; completedAt: string | null; manifest: unknown; dataCard: unknown }
 interface Format { key: string; name: string; extension: string; description: string }
 
@@ -385,10 +386,13 @@ export function Exports() {
   const quality = useApi<QualityRes>(`/projects/${p.id}/quality`);
   const [format, setFormat] = useState('JSONL');
   const [splits, setSplits] = useState<string[]>(['TRAIN']);
+  const [strategy, setStrategy] = useState('');
+  const splitBody = () => (strategy ? { splitStrategy: strategy, ratios: { train: 0.8, validation: 0.1, test: 0.1 } } : {});
+  const readiness = useAction(() => api.post<Readiness>(`/projects/${p.id}/readiness`, splitBody()));
   const [override, setOverride] = useState('');
   const [detail, setDetail] = useState<ExportRow | null>(null);
   const inv = [`/projects/${p.id}/exports`, '/canary'];
-  const create = useAction(() => api.post(`/projects/${p.id}/exports`, { format, includeSplits: splits, overrideReason: override || undefined }), { success: 'Export queued.', invalidate: inv, onSuccess: () => setOverride('') });
+  const create = useAction(() => api.post(`/projects/${p.id}/exports`, { format, includeSplits: splits, overrideReason: override || undefined, ...splitBody() }), { success: 'Export queued.', invalidate: inv, onSuccess: () => setOverride('') });
   const download = useAction((id: string) => api.post<{ url: string; fileName: string }>(`/projects/${p.id}/exports/${id}/download`), { onSuccess: (r) => { window.location.href = r.url; } });
   const scan = useAction((id: string) => api.post<{ matches: unknown[] }>(`/canary/scan-export/${id}`), { success: (r) => `Canary scan complete: ${(r as { matches?: unknown[] }).matches?.length ?? 0} registered values found in this package (expected, since it is synthetic).`, invalidate: ['/canary'] });
   const gateReady = quality.data?.gate.ready;
@@ -401,6 +405,24 @@ export function Exports() {
               <Field label="Format"><select value={format} onChange={(e) => setFormat(e.target.value)} style={{ width: 240 }}>{formats.data?.map((f) => <option key={f.key} value={f.key}>{f.name}</option>)}</select></Field>
               <fieldset><legend>Splits</legend><div className="row">{['TRAIN', 'VALIDATION', 'TEST'].map((s) => <label key={s} className="check"><input type="checkbox" checked={splits.includes(s)} onChange={() => setSplits(splits.includes(s) ? splits.filter((x) => x !== s) : [...splits, s])} />{humanize(s)}</label>)}</div></fieldset>
             </div>
+            <div className="row wrap" style={{ alignItems: 'flex-end' }}>
+              <Field label="Split strategy (records outside the gold set)">
+                <select value={strategy} onChange={(e) => setStrategy(e.target.value)} style={{ width: 320 }}>
+                  <option value="">Gold splits only (other records are TRAIN)</option>
+                  <option value="RANDOM">Random 80 / 10 / 10</option>
+                  <option value="STRATIFIED">Stratified by label 80 / 10 / 10</option>
+                  <option value="GROUPED">Grouped by slice 80 / 10 / 10</option>
+                </select>
+              </Field>
+              <button disabled={readiness.isPending} onClick={() => readiness.mutate(undefined)}>Check training readiness</button>
+            </div>
+            <ErrorBox error={readiness.error} />
+            {readiness.data ? (
+              <div className="callout small">
+                <strong>{readiness.data.ready ? 'Ready for training' : 'Not ready for training'}</strong> — {readiness.data.records} labeled records (train {readiness.data.splits.TRAIN ?? 0}, validation {readiness.data.splits.VALIDATION ?? 0}, test {readiness.data.splits.TEST ?? 0}). Records with the same text always share a split.
+                <table style={{ marginTop: 8 }}><tbody>{readiness.data.checks.map((c) => <tr key={c.key}><td>{c.passed ? 'Passed' : c.blocking ? 'Blocking' : 'Warning'}</td><td>{c.label}</td><td>{c.explanation}</td></tr>)}</tbody></table>
+              </div>
+            ) : null}
             <p className="small muted">{formats.data?.find((f) => f.key === format)?.description}</p>
             {quality.data && !gateReady ? (
               <div className="callout strong small">
