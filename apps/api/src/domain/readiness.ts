@@ -14,29 +14,53 @@ export function normalizeText(text: string) {
 
 const unit = (seed: string) => parseInt(createHash('sha256').update(seed).digest('hex').slice(0, 12), 16) / 0x1000000000000;
 
+export const MIN_GROUPS = 10;
+export class SplitError extends Error {}
+
 /**
- * Assigns train/validation/test splits. Records with the same normalized text (and, for GROUPED, the same group value)
- * always land in the same split, so no duplicate leaks across splits. Fixed splits (gold) pull their whole group with them.
+ * Assigns train/validation/test splits. Records with the same normalized text always land in the same split, so no
+ * duplicate leaks across splits; a text that is gold keeps the gold split. GROUPED additionally keeps every non-gold
+ * record with the same group value (for example a customer) together.
  */
 export function assignSplits(records: SplitRecord[], strategy: SplitStrategy, ratios: SplitRatios, seed: string): Map<string, Split> {
   const total = ratios.train + ratios.validation + ratios.test;
-  if (!(total > 0)) throw new Error('Split ratios must add up to more than zero.');
+  if (!(total > 0)) throw new SplitError('Split ratios must add up to more than zero.');
   const r = { train: ratios.train / total, validation: ratios.validation / total };
-  const groups = new Map<string, SplitRecord[]>();
+  const texts = new Map<string, SplitRecord[]>();
   for (const rec of records) {
-    const key = strategy === 'GROUPED' && rec.group ? `g:${rec.group}` : `t:${normalizeText(rec.text)}`;
-    groups.set(key, [...(groups.get(key) ?? []), rec]);
+    const key = `t:${normalizeText(rec.text)}`;
+    texts.set(key, [...(texts.get(key) ?? []), rec]);
   }
-  // Duplicate text inside a GROUPED group must also stay together: merge groups that share text.
   const out = new Map<string, Split>();
   const pick = (u: number): Split => (u < r.train ? 'TRAIN' : u < r.train + r.validation ? 'VALIDATION' : 'TEST');
   const free: { key: string; recs: SplitRecord[] }[] = [];
-  for (const [key, recs] of groups) {
+  for (const [key, recs] of texts) {
     const fixed = recs.map((x) => x.fixedSplit).find((s): s is Split => !!s);
     if (fixed) for (const x of recs) out.set(x.id, fixed);
     else free.push({ key, recs });
   }
-  if (strategy === 'STRATIFIED') {
+  if (strategy === 'GROUPED') {
+    // Union text groups that share a group value, so neither duplicate text nor a group spans two splits.
+    const parent = free.map((_, i) => i);
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i]!)));
+    const owner = new Map<string, number>();
+    free.forEach((g, i) => {
+      for (const x of g.recs) {
+        if (!x.group) continue;
+        const o = owner.get(x.group);
+        if (o === undefined) owner.set(x.group, i);
+        else parent[find(i)] = find(o);
+      }
+    });
+    const components = new Map<number, SplitRecord[]>();
+    free.forEach((g, i) => components.set(find(i), [...(components.get(find(i)) ?? []), ...g.recs]));
+    if (free.length && components.size < MIN_GROUPS) throw new SplitError(`Grouped splitting needs at least ${MIN_GROUPS} distinct groups; the slice field gives ${components.size}. Use Random or Stratified, or choose a slice field such as a customer or account id.`);
+    for (const recs of components.values()) {
+      const k = recs.map((x) => x.group ?? normalizeText(x.text)).sort()[0];
+      const split = pick(unit(`${seed}:g:${k}`));
+      for (const x of recs) out.set(x.id, split);
+    }
+  } else if (strategy === 'STRATIFIED') {
     const byLabel = new Map<string, typeof free>();
     for (const g of free) byLabel.set(g.recs[0]!.label, [...(byLabel.get(g.recs[0]!.label) ?? []), g]);
     for (const gs of byLabel.values()) {

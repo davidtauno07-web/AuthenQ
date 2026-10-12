@@ -9,7 +9,7 @@ Exports and the readiness check use the same split logic (`apps/api/src/domain/r
   - **Gold splits only** (default): `TRAIN`.
   - **Random**: deterministic hash of the export id, 80 / 10 / 10 by default.
   - **Stratified**: each label is spread across the splits in the same ratio.
-  - **Grouped**: every record with the same slice value (for example the same customer) lands in one split.
+  - **Grouped**: every non-gold record with the same slice value (for example the same customer) lands in one split. Needs at least 10 distinct groups; a slice with only a few categories is rejected with a clear message. Gold records keep their own split, so a group can only span splits through gold.
 - **Leakage guard:** records whose normalized text (case, spacing and punctuation removed) is identical always share a split. If one of them is gold, the whole group follows the gold split.
 
 ## Readiness checks

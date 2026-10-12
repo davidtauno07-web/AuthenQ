@@ -19,10 +19,19 @@ describe('training splits', () => {
     }
     expect(assignSplits(recs, 'RANDOM', { train: 8, validation: 1, test: 1 }, 'a')).toEqual(assignSplits(recs, 'RANDOM', { train: 8, validation: 1, test: 1 }, 'a'));
   });
+  it('does not let gold pull a whole group out of TRAIN, and rejects too few groups', () => {
+    const goldInEveryGroup = recs.map((r, i) => (i < 100 && i % 2 === 0 ? { ...r, fixedSplit: 'TEST' as const } : r));
+    const s = assignSplits(goldInEveryGroup, 'GROUPED', { train: 0.8, validation: 0.1, test: 0.1 }, 'x');
+    expect([...s.values()].filter((x) => x === 'TRAIN').length).toBeGreaterThan(recs.length * 0.5);
+    for (let i = 0; i < 100; i += 2) expect(s.get(`r${i}`)).toBe('TEST');
+    const fewGroups = recs.map((r, i) => ({ ...r, group: `slice-${i % 3}` }));
+    expect(() => assignSplits(fewGroups, 'GROUPED', { train: 0.8, validation: 0.1, test: 0.1 }, 'x')).toThrow(/at least 10 distinct/);
+  });
   it('keeps every record of a group together in GROUPED mode', () => {
     const s = assignSplits(recs, 'GROUPED', { train: 0.7, validation: 0.15, test: 0.15 }, 'x');
     const byGroup = new Map<string, Set<string>>();
     for (const r of recs) byGroup.set(r.group, (byGroup.get(r.group) ?? new Set()).add(s.get(r.id)!));
+    expect(new Set(s.values()).size).toBe(3);
     for (const v of byGroup.values()) expect(v.size).toBe(1);
   });
 });

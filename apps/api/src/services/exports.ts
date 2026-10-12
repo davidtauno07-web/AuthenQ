@@ -1,5 +1,5 @@
 import { detectTextEntities } from '../domain/firewall.js';
-import { assignSplits, DEFAULT_CRITERIA, DEFAULT_RATIOS, readinessChecks, type Split, type SplitRatios, type SplitStrategy } from '../domain/readiness.js';
+import { assignSplits, SplitError, DEFAULT_CRITERIA, DEFAULT_RATIOS, readinessChecks, type Split, type SplitRatios, type SplitStrategy } from '../domain/readiness.js';
 import { prisma, Prisma } from '../lib/prisma.js';
 import { sha256 } from '../lib/crypto.js';
 import { badRequest, forbidden, gateBlocked, notFound } from '../lib/errors.js';
@@ -87,6 +87,7 @@ export async function listExports(ctx: RequestContext, projectId: string) {
 export async function createExport(ctx: RequestContext, projectId: string, input: { format: string; includeSplits: string[]; overrideReason?: string } & SplitOptions) {
   const p = await getProjectOrThrow(ctx, projectId);
   if (!FORMATS[input.format]) throw badRequest(`Unknown export format "${input.format}".`);
+  if (input.splitStrategy) await readinessReport(ctx, projectId, input);
   const report = await qualityReport(ctx, projectId);
   let overrideReason: string | null = null;
   if (!report.gate.ready) {
@@ -128,12 +129,17 @@ const goldSplit = (g?: { split: string } | null): Split | null => (g?.split === 
 /** Splits for every labeled task: gold keeps its split, other records follow the chosen strategy (default: all TRAIN). */
 function splitsFor(p: { textFields: string[] } & Parameters<typeof taskText>[0], tasks: { id: string; sliceValue: string | null; finalLabels: unknown; gold: { split: string } | null; syntheticRow: { data: unknown } }[], opts: SplitOptions, seed: string) {
   if (!opts.splitStrategy) return new Map(tasks.map((t) => [t.id, goldSplit(t.gold) ?? ('TRAIN' as Split)]));
-  return assignSplits(
+  try {
+    return assignSplits(
     tasks.map((t) => ({ id: t.id, text: taskText(p, t.syntheticRow.data as Record<string, unknown>), label: (t.finalLabels as { label: string }).label, group: t.sliceValue, fixedSplit: goldSplit(t.gold) })),
     opts.splitStrategy,
     opts.ratios ?? DEFAULT_RATIOS,
     seed,
   );
+  } catch (err) {
+    if (err instanceof SplitError) throw badRequest(err.message);
+    throw err;
+  }
 }
 
 /** Training-readiness report for the labeled records, using the same split logic an export would use. */
