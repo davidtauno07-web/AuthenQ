@@ -149,6 +149,7 @@ labelingRouter.post(`${P}/engine/reprioritize`, requirePermission('engine.run'),
   res.json({ updated: await E.reprioritize(pid(req)) });
 }));
 labelingRouter.get(`${P}/trials`, requirePermission('labeling.read'), asyncHandler(async (req, res) => res.json(await E.listTrials(ctxOf(req), pid(req)))));
+labelingRouter.post(`${P}/optimize`, requirePermission('engine.run'), asyncHandler(async (req, res) => res.json(await E.optimizeSetup(ctxOf(req), pid(req)))));
 labelingRouter.post(`${P}/trials`, requirePermission('engine.run'), asyncHandler(async (req, res) => {
   const body = parse(z.object({ name: z.string().min(1).max(80), config: configSchema }), req.body);
   res.status(201).json(await E.runSetupTrial(ctxOf(req), pid(req), body as Parameters<typeof E.runSetupTrial>[2]));

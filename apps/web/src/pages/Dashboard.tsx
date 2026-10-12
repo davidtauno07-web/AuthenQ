@@ -12,6 +12,7 @@ interface DashboardRes {
     labeling: { projects: number; tasks: Record<string, number>; pendingReview: number };
     exports: { completed: number };
   };
+  attention: { key: string; count: number; text: string; href: string }[];
   projects: { id: string; name: string; status: string; goldLockedAt: string | null }[];
   jobs: { id: string; type: string; status: string; progress: number; createdAt: string; error: string | null }[];
   activity: { id: string; summary: string; actorLabel: string | null; createdAt: string }[];
@@ -62,6 +63,11 @@ export function Dashboard() {
           Upload a CSV, TSV, XLSX, JSON or JSONL file, or connect a PostgreSQL database. The Firewall classifies every column before anything leaves its boundary.
         </Empty>
       ) : null}
+      {d.attention.length ? (
+        <Panel title="Needs attention">
+          <ul className="stack" style={{ margin: 0, paddingLeft: 18 }}>{d.attention.map((a) => <li key={a.key}><Link to={a.href}><strong>{num(a.count)}</strong> {a.text}</Link></li>)}</ul>
+        </Panel>
+      ) : !empty ? <p className="small muted">Nothing needs attention right now.</p> : null}
       {p.canary.openAlerts > 0 ? (
         <div className="callout strong">
           <strong>{p.canary.openAlerts} open Canary alert{p.canary.openAlerts === 1 ? '' : 's'}.</strong> Synthetic values from your sets were found in scanned material. <Link to="/canary?tab=alerts" style={{ color: 'inherit' }}>Review alerts</Link>

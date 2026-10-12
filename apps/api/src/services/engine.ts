@@ -316,12 +316,8 @@ export async function bulkAccept(ctx: RequestContext, projectId: string, itemIds
 }
 
 // ── Setup trials ─────────────────────────────────────────────────────────────
-export async function runSetupTrial(ctx: RequestContext, projectId: string, input: { name: string; config: Partial<ProjectConfig> }) {
-  const p = await getProjectOrThrow(ctx, projectId);
-  const tuning = await prisma.goldRecord.findMany({ where: { projectId, split: 'TUNING', status: 'FINAL' }, include: { task: { select: { syntheticRow: { select: { data: true } } } } } });
-  if (tuning.length < 10) throw badRequest(`Setup trials need at least 10 final tuning gold records (there are ${tuning.length}).`);
-  const { model, trainedOn } = await trainModel(p, { excludeTuning: true });
-  const cfg = engineConfig(p, input.config);
+type TuningGold = { finalLabels: unknown; task: { syntheticRow: { data: unknown } } };
+function scoreOnTuning(p: Project, model: NaiveBayes, cfg: ReturnType<typeof engineConfig>, tuning: TuningGold[]) {
   const truth: string[] = [];
   const pred: string[] = [];
   let auto = 0;
@@ -337,7 +333,46 @@ export async function runSetupTrial(ctx: RequestContext, projectId: string, inpu
     }
   });
   const ev = evaluate(truth, pred, cfg.labels);
-  const metrics = { n: tuning.length, trainedOn, accuracy: ev.accuracy, interval: ev.interval, macroF1: ev.macroF1, autoRate: auto / tuning.length, autoAccuracy: auto ? autoCorrect / auto : null };
+  return { n: tuning.length, accuracy: ev.accuracy, interval: ev.interval, macroF1: ev.macroF1, autoRate: auto / tuning.length, autoAccuracy: auto ? autoCorrect / auto : null };
+}
+
+async function tuningGold(projectId: string) {
+  const tuning = await prisma.goldRecord.findMany({ where: { projectId, split: 'TUNING', status: 'FINAL' }, include: { task: { select: { syntheticRow: { select: { data: true } } } } } });
+  if (tuning.length < 10) throw badRequest(`Setup trials need at least 10 final tuning gold records (there are ${tuning.length}).`);
+  return tuning;
+}
+
+/**
+ * Compares auto-accept thresholds and pass counts on the tuning split only (the locked test set is never read).
+ * Recommends the configuration with the least review work whose auto-accepted labels meet the accuracy target, preferring fewer passes.
+ */
+export async function optimizeSetup(ctx: RequestContext, projectId: string) {
+  const p = await getProjectOrThrow(ctx, projectId);
+  const tuning = await tuningGold(projectId);
+  const { model, trainedOn } = await trainModel(p, { excludeTuning: true });
+  const target = projectConfig(p).quality.minAccuracy;
+  const candidates = [];
+  for (const autoAcceptThreshold of [0.6, 0.7, 0.8, 0.9, 0.95])
+    for (const passes of [1, 3, 5]) {
+      const cfg = engineConfig(p, { autoAcceptThreshold, passes });
+      const m = scoreOnTuning(p, model, cfg, tuning);
+      candidates.push({ config: { autoAcceptThreshold, passes, dropout: cfg.dropout }, ...m, reviewRate: 1 - m.autoRate, relativeCost: passes, meetsTarget: m.autoRate > 0 && (m.autoAccuracy ?? 0) >= target });
+    }
+  const ok = candidates.filter((c) => c.meetsTarget).sort((a, b) => a.reviewRate - b.reviewRate || a.relativeCost - b.relativeCost || (b.autoAccuracy ?? 0) - (a.autoAccuracy ?? 0));
+  const best = ok[0] ?? null;
+  const explanation = best
+    ? `Threshold ${best.config.autoAcceptThreshold} with ${best.config.passes} pass(es) auto-accepts ${(best.autoRate * 100).toFixed(0)}% of tuning records at ${((best.autoAccuracy ?? 0) * 100).toFixed(1)}% accuracy (target ${(target * 100).toFixed(0)}%), leaving ${(best.reviewRate * 100).toFixed(0)}% for review.`
+    : `No configuration reached ${(target * 100).toFixed(0)}% accuracy on auto-accepted tuning records. Add labeled examples or route everything to review.`;
+  await audit(ctx, { action: 'engine.optimize', resourceType: 'label_project', resourceId: p.id, summary: `Compared ${candidates.length} engine configurations on ${tuning.length} tuning records` });
+  return { tuningRecords: tuning.length, trainedOn, target, lockedTestUsed: false, candidates, recommendation: best && { config: best.config, explanation }, explanation };
+}
+
+export async function runSetupTrial(ctx: RequestContext, projectId: string, input: { name: string; config: Partial<ProjectConfig> }) {
+  const p = await getProjectOrThrow(ctx, projectId);
+  const tuning = await tuningGold(projectId);
+  const { model, trainedOn } = await trainModel(p, { excludeTuning: true });
+  const cfg = engineConfig(p, input.config);
+  const metrics = { trainedOn, ...scoreOnTuning(p, model, cfg, tuning) };
   const trial = await prisma.setupTrial.create({ data: { orgId: ctx.orgId, projectId, name: input.name, config: cfg as unknown as Prisma.InputJsonValue, metrics: metrics as unknown as Prisma.InputJsonValue, createdById: ctx.userId } });
   await audit(ctx, { action: 'engine.setup_trial', resourceType: 'setup_trial', resourceId: trial.id, summary: `Ran setup trial "${input.name}" on ${tuning.length} tuning records` });
   return trial;

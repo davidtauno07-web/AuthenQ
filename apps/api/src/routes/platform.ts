@@ -33,7 +33,11 @@ platformRouter.get('/dashboard', asyncHandler(async (req, res) => {
     prisma.export.count({ where: { orgId, status: 'COMPLETED', deletedAt: null } }),
     prisma.canaryRegistry.count({ where: { orgId } }),
   ]);
-  const pending = await prisma.engineItem.count({ where: { orgId, reviewStatus: 'PENDING' } });
+  const [pending, pendingSets, flaggedTasks] = await Promise.all([
+    prisma.engineItem.count({ where: { orgId, reviewStatus: 'PENDING' } }),
+    prisma.syntheticSet.count({ where: { orgId, deletedAt: null, approvalStatus: 'PENDING' } }),
+    prisma.task.count({ where: { orgId, status: 'FLAGGED' } }),
+  ]);
   const sum = (g: { _count: { _all: number } }[]) => g.reduce((a, x) => a + x._count._all, 0);
   const statuses = (g: { status: string; _count: { _all: number } }[]) => Object.fromEntries(g.map((x) => [x.status, x._count._all]));
   res.json({
@@ -44,6 +48,14 @@ platformRouter.get('/dashboard', asyncHandler(async (req, res) => {
       labeling: { projects: projects.length, tasks: statuses(tasks), pendingReview: pending },
       exports: { completed: exportsCount },
     },
+    attention: [
+      { key: 'sources', count: statuses(sources).NEEDS_REVIEW ?? 0, text: 'data sources need a Firewall classification review', href: '/sources' },
+      { key: 'sets', count: pendingSets, text: 'synthetic sets are waiting for approval', href: '/synthetic' },
+      { key: 'alerts', count: openAlerts, text: 'Canary alerts are open', href: '/canary?tab=alerts' },
+      { key: 'review', count: pending, text: 'engine labels are waiting for human review', href: '/projects' },
+      { key: 'flagged', count: flaggedTasks, text: 'labeling tasks are flagged (for example, import conflicts)', href: '/projects' },
+      { key: 'jobs', count: jobs.filter((j) => j.status === 'FAILED').length, text: 'background jobs failed', href: '/jobs' },
+    ].filter((a) => a.count > 0),
     projects,
     jobs,
     activity,

@@ -144,6 +144,7 @@ export function Engine() {
   const estimate = useAction(() => api.post<Estimate>(`/projects/${p.id}/engine/estimate`, body()), { onSuccess: setEst });
   const start = useAction(() => api.post(`/projects/${p.id}/engine/runs`, body()), { success: 'Engine run queued.', invalidate: inv, onSuccess: () => { setEst(null); refetch(); } });
   const reprio = useAction(() => api.post(`/projects/${p.id}/engine/reprioritize`), { success: 'Tasks reprioritized by uncertainty.', invalidate: inv });
+  const optimize = useAction(() => api.post<Optimize>(`/projects/${p.id}/optimize`), { invalidate: [`/projects/${p.id}/trials`] });
   const runTrial = useAction(() => api.post(`/projects/${p.id}/trials`, { name: trial.name, config: { autoAcceptThreshold: trial.threshold, passes: trial.passes, dropout: trial.dropout } }), { success: 'Setup trial finished.', invalidate: [`/projects/${p.id}/trials`] });
   return (
     <div className="stack lg">
@@ -185,6 +186,17 @@ export function Engine() {
               <Field label="Passes"><input type="number" min={1} max={7} value={trial.passes} onChange={(e) => setTrial({ ...trial, passes: Number(e.target.value) })} style={{ width: 90 }} /></Field>
               <Field label="Dropout"><input type="number" step="0.01" min={0} max={0.5} value={trial.dropout} onChange={(e) => setTrial({ ...trial, dropout: Number(e.target.value) })} style={{ width: 100 }} /></Field>
               <button disabled={!trial.name || runTrial.isPending} onClick={() => runTrial.mutate(undefined)}>Run trial</button>
+            </div>
+          ) : null}
+          {can('engine.run') ? <div><button disabled={optimize.isPending} onClick={() => optimize.mutate(undefined)}>Find the best setting</button></div> : null}
+          <ErrorBox error={optimize.error} />
+          {optimize.data ? (
+            <div className="callout small">
+              <strong>{optimize.data.recommendation ? 'Recommended setting' : 'No setting meets the target'}</strong> — {optimize.data.explanation} Compared on {optimize.data.tuningRecords} tuning records; the locked test set was not used.
+              <table style={{ marginTop: 8 }}><thead><tr><th className="num">Threshold</th><th className="num">Passes</th><th className="num">Auto-accepted</th><th className="num">Auto accuracy</th><th className="num">Overall accuracy</th><th className="num">Relative time</th></tr></thead>
+                <tbody>{optimize.data.candidates.map((c) => <tr key={`${c.config.autoAcceptThreshold}-${c.config.passes}`} style={optimize.data!.recommendation?.config.autoAcceptThreshold === c.config.autoAcceptThreshold && optimize.data!.recommendation?.config.passes === c.config.passes ? { fontWeight: 600 } : undefined}><td className="num">{c.config.autoAcceptThreshold}</td><td className="num">{c.config.passes}</td><td className="num">{(c.autoRate * 100).toFixed(0)}%</td><td className="num">{c.autoAccuracy === null ? '—' : `${(c.autoAccuracy * 100).toFixed(1)}%`}</td><td className="num">{(c.accuracy * 100).toFixed(1)}%</td><td className="num">{c.relativeCost}×</td></tr>)}</tbody>
+              </table>
+              {optimize.data.recommendation ? <button className="sm" style={{ marginTop: 8 }} onClick={() => setTrial({ ...trial, name: trial.name || 'Recommended', threshold: optimize.data!.recommendation!.config.autoAcceptThreshold, passes: optimize.data!.recommendation!.config.passes })}>Use in a trial</button> : null}
             </div>
           ) : null}
           <Help>Trials evaluate a configuration against the tuning split only, so you can compare settings without touching the locked test set.</Help>
@@ -374,6 +386,7 @@ export function Quality() {
 }
 
 // ── Exports ─────────────────────────────────────────────────────────────────
+interface Optimize { tuningRecords: number; explanation: string; recommendation: { config: { autoAcceptThreshold: number; passes: number } } | null; candidates: { config: { autoAcceptThreshold: number; passes: number }; autoRate: number; autoAccuracy: number | null; accuracy: number; relativeCost: number }[] }
 interface Readiness { ready: boolean; records: number; splits: Record<string, number>; checks: { key: string; label: string; passed: boolean; blocking: boolean; explanation: string }[] }
 interface ExportRow { id: string; version: number; format: string; status: string; options: { includeSplits?: string[] }; gate: { ready: boolean; checks?: Check[] } | null; safety: { passed: boolean; explanation: string; realValueMatches?: number; canaryValues?: number } | null; overrideReason: string | null; recordCount: number; checksum: string | null; createdAt: string; completedAt: string | null; manifest: unknown; dataCard: unknown }
 interface Format { key: string; name: string; extension: string; description: string }
