@@ -168,6 +168,9 @@ labelingRouter.post(`${P}/review-bulk-accept`, requirePermission('labeling.revie
 }));
 
 // Quality
+const ratioShape = z.object({ train: z.number().min(0).max(1), validation: z.number().min(0).max(1), test: z.number().min(0).max(1) }).refine((r) => r.train + r.validation + r.test > 0.99 && r.train + r.validation + r.test < 1.01, 'Split ratios must add up to 100%.');
+const splitShape = { splitStrategy: z.enum(['RANDOM', 'STRATIFIED', 'GROUPED']).optional(), ratios: ratioShape.optional() };
+labelingRouter.post(`${P}/readiness`, requirePermission('quality.read'), asyncHandler(async (req, res) => res.json(await X.readinessReport(ctxOf(req), pid(req), parse(z.object(splitShape), req.body ?? {})))));
 labelingRouter.get(`${P}/quality`, requirePermission('quality.read'), asyncHandler(async (req, res) => res.json(await qualityReport(ctxOf(req), pid(req)))));
 
 // Exports
@@ -190,7 +193,7 @@ labelingRouter.get('/export-formats', requirePermission('exports.read'), (_req, 
 });
 labelingRouter.get(`${P}/exports`, requirePermission('exports.read'), asyncHandler(async (req, res) => res.json(await X.listExports(ctxOf(req), pid(req)))));
 labelingRouter.post(`${P}/exports`, requirePermission('exports.create'), asyncHandler(async (req, res) => {
-  const body = parse(z.object({ format: z.string(), includeSplits: z.array(z.enum(['TRAIN', 'VALIDATION', 'TEST'])).min(1).default(['TRAIN']), overrideReason: z.string().max(2000).optional() }), req.body);
+  const body = parse(z.object({ format: z.string(), includeSplits: z.array(z.enum(['TRAIN', 'VALIDATION', 'TEST'])).min(1).default(['TRAIN']), overrideReason: z.string().max(2000).optional(), ...splitShape }), req.body);
   res.status(202).json(await X.createExport(ctxOf(req), pid(req), body));
 }));
 labelingRouter.get(`${P}/exports/:exportId`, requirePermission('exports.read'), asyncHandler(async (req, res) => res.json(await X.getExport(ctxOf(req), pid(req), param(req, 'exportId')))));

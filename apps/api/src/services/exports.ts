@@ -1,4 +1,5 @@
 import { detectTextEntities } from '../domain/firewall.js';
+import { assignSplits, DEFAULT_CRITERIA, DEFAULT_RATIOS, readinessChecks, type Split, type SplitRatios, type SplitStrategy } from '../domain/readiness.js';
 import { prisma, Prisma } from '../lib/prisma.js';
 import { sha256 } from '../lib/crypto.js';
 import { badRequest, forbidden, gateBlocked, notFound } from '../lib/errors.js';
@@ -83,7 +84,7 @@ export async function listExports(ctx: RequestContext, projectId: string) {
   return prisma.export.findMany({ where: { projectId, deletedAt: null }, orderBy: { version: 'desc' } });
 }
 
-export async function createExport(ctx: RequestContext, projectId: string, input: { format: string; includeSplits: string[]; overrideReason?: string }) {
+export async function createExport(ctx: RequestContext, projectId: string, input: { format: string; includeSplits: string[]; overrideReason?: string } & SplitOptions) {
   const p = await getProjectOrThrow(ctx, projectId);
   if (!FORMATS[input.format]) throw badRequest(`Unknown export format "${input.format}".`);
   const report = await qualityReport(ctx, projectId);
@@ -102,7 +103,7 @@ export async function createExport(ctx: RequestContext, projectId: string, input
       projectId,
       version: (last?.version ?? 0) + 1,
       format: input.format,
-      options: { includeSplits: input.includeSplits } as Prisma.InputJsonValue,
+      options: { includeSplits: input.includeSplits, splitStrategy: input.splitStrategy, ratios: input.ratios } as Prisma.InputJsonValue,
       gate: { ready: report.gate.ready, checks: report.gate.checks } as unknown as Prisma.InputJsonValue,
       overrideReason,
       overrideById: overrideReason ? ctx.userId : null,
@@ -121,13 +122,43 @@ export async function createExport(ctx: RequestContext, projectId: string, input
   return { ...exp, jobId: job.id };
 }
 
+type SplitOptions = { splitStrategy?: SplitStrategy; ratios?: SplitRatios };
+const goldSplit = (g?: { split: string } | null): Split | null => (g?.split === 'LOCKED_TEST' ? 'TEST' : g?.split === 'TUNING' ? 'VALIDATION' : null);
+
+/** Splits for every labeled task: gold keeps its split, other records follow the chosen strategy (default: all TRAIN). */
+function splitsFor(p: { textFields: string[] } & Parameters<typeof taskText>[0], tasks: { id: string; sliceValue: string | null; finalLabels: unknown; gold: { split: string } | null; syntheticRow: { data: unknown } }[], opts: SplitOptions, seed: string) {
+  if (!opts.splitStrategy) return new Map(tasks.map((t) => [t.id, goldSplit(t.gold) ?? ('TRAIN' as Split)]));
+  return assignSplits(
+    tasks.map((t) => ({ id: t.id, text: taskText(p, t.syntheticRow.data as Record<string, unknown>), label: (t.finalLabels as { label: string }).label, group: t.sliceValue, fixedSplit: goldSplit(t.gold) })),
+    opts.splitStrategy,
+    opts.ratios ?? DEFAULT_RATIOS,
+    seed,
+  );
+}
+
+/** Training-readiness report for the labeled records, using the same split logic an export would use. */
+export async function readinessReport(ctx: RequestContext, projectId: string, opts: SplitOptions) {
+  const p = await getProjectOrThrow(ctx, projectId);
+  const labels = labelsOf(p).map((l) => l.value);
+  const tasks = await prisma.task.findMany({
+    where: { projectId, status: { in: ['DONE', 'LABELED'] }, finalLabels: { not: Prisma.AnyNull } },
+    select: { id: true, sliceValue: true, finalLabels: true, gold: { select: { split: true } }, syntheticRow: { select: { data: true } } },
+  });
+  const splits = splitsFor(p, tasks, opts, `${projectId}:preview`);
+  const [unlabeled, flagged] = await Promise.all([prisma.task.count({ where: { projectId, status: { in: ['OPEN', 'SKIPPED', 'IN_REVIEW'] } } }), prisma.task.count({ where: { projectId, status: 'FLAGGED' } })]);
+  const records = tasks.map((t) => ({ id: t.id, text: taskText(p, t.syntheticRow.data as Record<string, unknown>), label: (t.finalLabels as { label: string }).label, split: splits.get(t.id)! }));
+  const result = readinessChecks(records, { labels, unlabeled, flagged, criteria: DEFAULT_CRITERIA });
+  const splitCounts = records.reduce<Record<string, number>>((a, r) => ((a[r.split] = (a[r.split] ?? 0) + 1), a), {});
+  return { projectId, records: records.length, splitStrategy: opts.splitStrategy ?? 'GOLD_ONLY', ratios: opts.ratios ?? DEFAULT_RATIOS, splits: splitCounts, criteria: DEFAULT_CRITERIA, ...result };
+}
+
 export async function runExportJob(orgId: string, payload: { exportId: string }, reporter: JobReporter) {
   const exp = await prisma.export.update({ where: { id: payload.exportId }, data: { status: 'BUILDING' } });
   const p = await prisma.labelProject.findUniqueOrThrow({ where: { id: exp.projectId } });
   const ctx = systemContext(orgId, 'Export builder');
   const fmt = FORMATS[exp.format]!;
   const labels = labelsOf(p).map((l) => l.value);
-  const opts = exp.options as { includeSplits?: string[] };
+  const opts = exp.options as { includeSplits?: string[] } & SplitOptions;
   const includeSplits = new Set(opts.includeSplits?.length ? opts.includeSplits : ['TRAIN']);
   const guideline = p.activeGuidelineVersionId ? await prisma.guidelineVersion.findUnique({ where: { id: p.activeGuidelineVersionId } }) : null;
   const versions = new Map((await prisma.guidelineVersion.findMany({ where: { projectId: p.id }, select: { id: true, version: true } })).map((v) => [v.id, v.version]));
@@ -140,8 +171,9 @@ export async function runExportJob(orgId: string, payload: { exportId: string },
   const labelRows = new Map((await prisma.label.findMany({ where: { id: { in: finalLabelIds } }, select: { id: true, guidelineVersionId: true } })).map((l) => [l.id, l]));
   await reporter.progress(0, tasks.length, undefined, `Collected ${tasks.length} labeled records`);
   const records: ExportRecord[] = [];
+  const splits = splitsFor(p, tasks, opts, exp.id);
   for (const t of tasks) {
-    const split = t.gold?.split === 'LOCKED_TEST' ? 'TEST' : t.gold?.split === 'TUNING' ? 'VALIDATION' : 'TRAIN';
+    const split = splits.get(t.id)!;
     if (!includeSplits.has(split)) continue;
     const data = t.syntheticRow.data as Record<string, unknown>;
     const gv = t.finalLabelId ? labelRows.get(t.finalLabelId)?.guidelineVersionId : null;
@@ -203,6 +235,8 @@ export async function runExportJob(orgId: string, payload: { exportId: string },
   for (let i = 0; i < registry.length; i += 5000) await prisma.exposure.createMany({ data: registry.slice(i, i + 5000).map((r) => ({ orgId, sendId: send.id, registryId: r.id })), skipDuplicates: true });
 
   const report = await qualityReport({ ...ctx, roleKey: 'ADMIN' }, p.id);
+  const [unlabeledCount, flaggedCount] = await Promise.all([prisma.task.count({ where: { projectId: p.id, status: { in: ['OPEN', 'SKIPPED', 'IN_REVIEW'] } } }), prisma.task.count({ where: { projectId: p.id, status: 'FLAGGED' } })]);
+  const readiness = readinessChecks(records.map((r) => ({ ...r, split: r.split as Split })), { labels, unlabeled: unlabeledCount, flagged: flaggedCount, criteria: DEFAULT_CRITERIA });
   const splitCounts = records.reduce<Record<string, number>>((a, r) => ((a[r.split] = (a[r.split] ?? 0) + 1), a), {});
   const sourceCounts = records.reduce<Record<string, number>>((a, r) => ((a[r.source] = (a[r.source] ?? 0) + 1), a), {});
   const labelCounts = records.reduce<Record<string, number>>((a, r) => ((a[r.label] = (a[r.label] ?? 0) + 1), a), {});
@@ -226,6 +260,8 @@ export async function runExportJob(orgId: string, payload: { exportId: string },
     labelSources: sourceCounts,
     quality: { gate: report.gate, evaluation: report.evaluation && { accuracy: report.evaluation.accuracy, interval: report.evaluation.interval, n: report.evaluation.n, macroF1: report.evaluation.macroF1 }, humanAgreement: report.humanAgreement, reviewRate: report.reviewRate, audit: report.audit },
     override: exp.overrideReason ? { reason: exp.overrideReason, byUserId: exp.overrideById } : null,
+    splitting: { strategy: opts.splitStrategy ?? 'GOLD_ONLY', ratios: opts.splitStrategy ? opts.ratios ?? DEFAULT_RATIOS : null, leakageGuard: 'Records with the same normalized text always share a split.' },
+    trainingReadiness: readiness,
     safety,
     limitations: [
       'Records are synthetic and derived from organizational data via AuthenQ Twin; they do not describe real people.',
