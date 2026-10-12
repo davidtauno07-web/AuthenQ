@@ -25,7 +25,7 @@ beforeAll(async () => {
   agent = request.agent(app);
   const res = await agent.post('/api/v1/auth/login').send({ email: 'admin@authenq.demo', password: process.env.DEMO_PASSWORD });
   expect(res.status).toBe(200);
-  projectId = (await prisma.labelProject.findFirstOrThrow({ where: { orgId } })).id;
+  projectId = (await prisma.labelProject.findFirstOrThrow({ where: { orgId }, orderBy: { createdAt: 'asc' } })).id;
 });
 
 afterAll(() => prisma.$disconnect());
@@ -36,7 +36,7 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('acceptance: Support
   });
 
   it('Firewall: 300 customers and 800 tickets, classified and signed off', async () => {
-    const source = await prisma.dataSource.findFirstOrThrow({ where: { orgId }, include: { tables: true } });
+    const source = await prisma.dataSource.findFirstOrThrow({ where: { orgId }, orderBy: { createdAt: 'asc' }, include: { tables: true } });
     const counts = Object.fromEntries(source.tables.map((t) => [t.name, t.rowCount]));
     expect(counts).toMatchObject({ customers: 300, tickets: 800 });
     expect(source.status).toBe('SIGNED_OFF');
@@ -47,7 +47,7 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('acceptance: Support
   });
 
   it('Twin + Canary: synthetic set is ready, safe and registered', async () => {
-    const set = await prisma.syntheticSet.findFirstOrThrow({ where: { orgId } });
+    const set = await prisma.syntheticSet.findFirstOrThrow({ where: { orgId }, orderBy: { createdAt: 'asc' } });
     expect(set.status).toBe('READY');
     expect(set.safetyPassed).toBe(true);
     expect(set.rowCount).toBe(1100);
