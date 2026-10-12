@@ -96,6 +96,17 @@ export async function previewObject(ctx: RequestContext, id: string, object: str
 }
 
 /** Reads whole objects in pages for Firewall ingestion. Stops at MAX_CONNECTOR_ROWS per object and honours cancellation between pages. */
+/** Gives each imported table a distinct name: sheets such as "Sales-2026" and "Sales 2026" both normalize to sales_2026. */
+export function tableNamer() {
+  const used = new Set<string>();
+  return (n: string) => {
+    let candidate = n;
+    for (let i = 2; used.has(candidate); i++) candidate = `${n}_${i}`;
+    used.add(candidate);
+    return candidate;
+  };
+}
+
 export async function readConnectorTables(
   connector: { type: string; credentialsEnc: string | null },
   objects: string[],
@@ -106,6 +117,7 @@ export async function readConnectorTables(
   const cfg = decodeConfig(connector.credentialsEnc);
   await assertTargets(driver, cfg);
   const out: ParsedTable[] = [];
+  const uniqueName = tableNamer();
   try {
     for (const object of objects) {
       const base = object.split('/').pop()!.split('.').filter(Boolean);
@@ -115,8 +127,9 @@ export async function readConnectorTables(
         const tables = await driver.readTables(cfg, object);
         for (const t of tables) {
           const rows = t.rows.slice(0, MAX_CONNECTOR_ROWS);
-          out.push({ name: tables.length > 1 ? `${name}_${t.name}`.toLowerCase() : name, rows });
-          await opts.onProgress?.(`Read ${rows.length} rows from ${object}${tables.length > 1 ? ` (table ${t.name})` : ''}${t.rows.length > MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
+          const tableName = uniqueName(tables.length > 1 ? `${name}_${t.name}`.toLowerCase() : name);
+          out.push({ name: tableName, rows });
+          await opts.onProgress?.(`Read ${rows.length} rows from ${object}${tables.length > 1 ? ` (table ${t.name}, imported as ${tableName})` : ''}${t.rows.length > MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
         }
         continue;
       }
@@ -127,7 +140,7 @@ export async function readConnectorTables(
         rows.push(...page.rows);
         if (!page.hasMore) break;
       }
-      out.push({ name, rows });
+      out.push({ name: uniqueName(name), rows });
       await opts.onProgress?.(`Read ${rows.length} rows from ${object}${rows.length >= MAX_CONNECTOR_ROWS ? ` (stopped at the ${MAX_CONNECTOR_ROWS}-row limit)` : ''}`);
     }
   } catch (err) {

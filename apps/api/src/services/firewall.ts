@@ -220,15 +220,28 @@ export async function uploadToSource(ctx: RequestContext, sourceId: string, file
   const key = storageKey(ctx.orgId, 'source-uploads', record.id, file.originalname.split('.').pop() ?? 'bin');
   await storage.put(key, file.buffer, record.contentType);
   await prisma.file.update({ where: { id: record.id }, data: { storageKey: key } });
-  await prisma.dataSource.update({ where: { id: source.id }, data: { status: 'INGESTING', lastError: null } });
-  const job = await enqueue({
-    orgId: ctx.orgId,
-    type: 'FIREWALL_INGEST',
-    payload: { sourceId, fileId: record.id, tableName: tableName ?? null },
-    resourceType: 'data_source',
-    resourceId: sourceId,
-    createdById: ctx.userId,
+  // Same row lock as purgeSource: either the purge finds this upload's job and deletes the file, or this upload sees the purge and removes it.
+  const job = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ deletedAt: Date | null; sourcePurgedAt: Date | null }[]>`SELECT "deletedAt", "sourcePurgedAt" FROM data_sources WHERE id = ${source.id}::uuid AND "orgId" = ${ctx.orgId}::uuid FOR UPDATE`;
+    if (!locked.length || locked[0]!.deletedAt || locked[0]!.sourcePurgedAt) return null;
+    await tx.dataSource.update({ where: { id: source.id }, data: { status: 'INGESTING', lastError: null } });
+    return enqueue(
+      {
+        orgId: ctx.orgId,
+        type: 'FIREWALL_INGEST',
+        payload: { sourceId, fileId: record.id, tableName: tableName ?? null },
+        resourceType: 'data_source',
+        resourceId: sourceId,
+        createdById: ctx.userId,
+      },
+      tx,
+    );
   });
+  if (!job) {
+    await storage.delete(key).catch(() => undefined);
+    await prisma.file.update({ where: { id: record.id }, data: { deletedAt: new Date() } });
+    throw badRequest(PURGED_SOURCE);
+  }
   await audit(ctx, {
     action: 'source.uploaded',
     resourceType: 'data_source',

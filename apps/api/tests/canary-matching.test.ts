@@ -27,7 +27,7 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('canary scan match t
     const org = await prisma.organization.findUnique({ where: { slug: 'northwind-demo' } });
     if (!org) return;
     const admin = await prisma.user.findFirstOrThrow({ where: { email: 'admin@authenq.demo' } });
-    const ctx = { orgId: org.id, userId: admin.id, actorType: 'USER', actorLabel: 'test', roleKey: 'ADMIN', permissions: new Set<never>() } as never;
+    const ctx = { orgId: org.id, userId: admin.id, actorType: 'USER', actorLabel: 'test', roleKey: 'ADMIN', permissions: new Set(['firewall.signoff']) } as never;
     const phone = await prisma.canaryRegistry.findFirstOrThrow({ where: { orgId: org.id, entityType: 'PHONE', fuzzyKey: { not: null } } });
     const email = await prisma.canaryRegistry.findFirstOrThrow({ where: { orgId: org.id, entityType: 'EMAIL', fuzzyKey: { not: null } } });
 
@@ -57,5 +57,32 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('canary scan match t
     expect(closed.resolvedById).toBe(admin.id);
     const filtered = await canary.listAlerts(ctx, undefined, { matchType: 'APPROXIMATE', q: 'approx' });
     expect(filtered.some((a) => a.id === alert.id)).toBe(true);
+  });
+
+  it('hides values from sets that are not approved from people who cannot approve sets', async () => {
+    const { prisma } = await import('../src/lib/prisma.js');
+    const canary = await import('../src/services/canary.js');
+    const org = await prisma.organization.findUnique({ where: { slug: 'northwind-demo' } });
+    if (!org) return;
+    const admin = await prisma.user.findFirstOrThrow({ where: { email: 'admin@authenq.demo' } });
+    const base = { orgId: org.id, userId: admin.id, actorType: 'USER', actorLabel: 'test' };
+    const scanner = { ...base, roleKey: 'ENGINEER', permissions: new Set(['canary.scan', 'canary.read']) } as never;
+    const approver = { ...base, roleKey: 'ADMIN', permissions: new Set(['canary.scan', 'canary.read', 'firewall.signoff']) } as never;
+    const email = await prisma.canaryRegistry.findFirstOrThrow({ where: { orgId: org.id, entityType: 'EMAIL' } });
+    const set = await prisma.syntheticSet.findUniqueOrThrow({ where: { id: email.setId } });
+    const scan = (ctx: never) => canary.scanText(ctx, { text: `contact: ${email.value}`, inputName: 'pending-set', inputType: 'TEXT' });
+    try {
+      await prisma.syntheticSet.update({ where: { id: set.id }, data: { approvalStatus: 'PENDING' } });
+      const hidden = await scan(scanner);
+      expect(hidden.matches.some((m) => m.registryId === email.id)).toBe(false);
+      expect(hidden.verdict).toBe('NOT_FOUND');
+      expect((await canary.searchRegistry(scanner, email.value)).some((r) => r.id === email.id)).toBe(false);
+      await expect(canary.traceValue(scanner, email.id)).rejects.toThrow();
+      expect((await scan(approver)).matches.some((m) => m.registryId === email.id)).toBe(true);
+      await prisma.syntheticSet.update({ where: { id: set.id }, data: { approvalStatus: 'APPROVED' } });
+      expect((await scan(scanner)).matches.some((m) => m.registryId === email.id)).toBe(true);
+    } finally {
+      await prisma.syntheticSet.update({ where: { id: set.id }, data: { approvalStatus: set.approvalStatus } });
+    }
   });
 });

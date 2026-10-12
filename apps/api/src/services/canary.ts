@@ -4,20 +4,27 @@ import { prisma } from '../lib/prisma.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { classifyFuzzy, contextAround, extractCandidates, extractFuzzy, normalize, SCAN_DISCLAIMER, signature, type MatchType } from '../domain/canary.js';
 import { audit } from '../modules/audit.js';
-import type { RequestContext } from '../modules/context.js';
+import { can, type RequestContext } from '../modules/context.js';
 import { emit, notifyRole } from '../modules/platform/events.js';
 import { storage } from '../lib/storage.js';
 
 const MAX_SCAN_CHARS = 20_000_000;
 
+/** Values from sets still waiting for approval (or rejected) are visible only to people who can approve sets. */
+async function setScope(ctx: RequestContext): Promise<{ setId?: { in: string[] } }> {
+  if (can(ctx, 'firewall.signoff')) return {};
+  const sets = await prisma.syntheticSet.findMany({ where: { orgId: ctx.orgId, approvalStatus: 'APPROVED' }, select: { id: true } });
+  return { setId: { in: sets.map((s) => s.id) } };
+}
+
 export async function searchRegistry(ctx: RequestContext, q: string, limit = 50) {
   const term = q.trim();
   if (!term) {
-    return prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId }, orderBy: { createdAt: 'desc' }, take: limit, include: { _count: { select: { exposures: true, alerts: true } } } });
+    return prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId, ...(await setScope(ctx)) }, orderBy: { createdAt: 'desc' }, take: limit, include: { _count: { select: { exposures: true, alerts: true } } } });
   }
   const variants = [...new Set(['GENERIC', 'PHONE', 'EMAIL'].map((t) => normalize(term, t)))];
   return prisma.canaryRegistry.findMany({
-    where: { orgId: ctx.orgId, OR: [{ normalized: { in: variants } }, { normalized: { startsWith: variants[0]! } }, { signature: term }] },
+    where: { orgId: ctx.orgId, ...(await setScope(ctx)), OR: [{ normalized: { in: variants } }, { normalized: { startsWith: variants[0]! } }, { signature: term }] },
     take: limit,
     include: { _count: { select: { exposures: true, alerts: true } } },
   });
@@ -25,7 +32,7 @@ export async function searchRegistry(ctx: RequestContext, q: string, limit = 50)
 
 export async function traceValue(ctx: RequestContext, registryId: string) {
   const entry = await prisma.canaryRegistry.findFirst({
-    where: { id: registryId, orgId: ctx.orgId },
+    where: { id: registryId, orgId: ctx.orgId, ...(await setScope(ctx)) },
     include: {
       exposures: { include: { send: true }, orderBy: { createdAt: 'asc' } },
       alerts: { include: { scan: true }, orderBy: { createdAt: 'desc' } },
@@ -51,17 +58,18 @@ export async function scanText(ctx: RequestContext, input: { text: string; input
   if (input.text.length > MAX_SCAN_CHARS) throw badRequest('The input is larger than 20 million characters. Split it into smaller files.');
   const candidates = extractCandidates(input.text);
   const keys = [...candidates.keys()];
+  const scope = await setScope(ctx);
   const matches: Awaited<ReturnType<typeof prisma.canaryRegistry.findMany>> = [];
   for (let i = 0; i < keys.length; i += 1000) {
     const chunk = keys.slice(i, i + 1000);
-    matches.push(...(await prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId, normalized: { in: chunk } } })));
+    matches.push(...(await prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId, ...scope, normalized: { in: chunk } } })));
   }
   const unique = new Map(matches.map((m) => [m.id, m]));
   const fuzzy = extractFuzzy(input.text);
   const fkeys = [...fuzzy.keys()];
   const fuzzyHits: typeof matches = [];
   for (let i = 0; i < fkeys.length && fuzzyHits.length < MAX_FUZZY; i += 1000) {
-    fuzzyHits.push(...(await prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId, fuzzyKey: { in: fkeys.slice(i, i + 1000) } }, take: MAX_FUZZY })));
+    fuzzyHits.push(...(await prisma.canaryRegistry.findMany({ where: { orgId: ctx.orgId, ...scope, fuzzyKey: { in: fkeys.slice(i, i + 1000) } }, take: MAX_FUZZY })));
   }
   type Hit = { m: (typeof matches)[number]; raw: string; index: number; matchType: MatchType; confidence: number; explanation: string };
   const hits: Hit[] = [];

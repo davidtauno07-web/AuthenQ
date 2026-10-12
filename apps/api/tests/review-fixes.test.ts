@@ -6,6 +6,7 @@ import { assertOutboundHost, isPrivateAddress } from '../src/lib/net.js';
 import { prisma } from '../src/lib/prisma.js';
 import { firewallGate, parseUpload } from '../src/services/firewall.js';
 import { getProjectOrThrow, listProjects } from '../src/services/labeling.js';
+import { tableNamer } from '../src/services/connectors.js';
 import type { RequestContext } from '../src/modules/context.js';
 
 afterAll(async () => {
@@ -16,6 +17,18 @@ describe('upload parsing', () => {
   it('keeps both columns when headers normalize to the same name', async () => {
     const [t] = await parseUpload('people.csv', Buffer.from('Customer ID,customer-id\n1,2\n'));
     expect(t!.rows[0]).toEqual({ customer_id: '1', customer_id_2: '2' });
+  });
+});
+
+describe('connector table names', () => {
+  it('keeps every sheet when sheet names normalize to the same table name', () => {
+    const name = tableNamer();
+    expect(['report_sales_2026', 'report_sales_2026', 'report_sales_2026', 'report_sales_2026_2'].map(name)).toEqual([
+      'report_sales_2026',
+      'report_sales_2026_2',
+      'report_sales_2026_3',
+      'report_sales_2026_2_2',
+    ]);
   });
 });
 

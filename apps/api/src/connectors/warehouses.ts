@@ -33,7 +33,12 @@ function sqlPage(run: (sql: string) => Promise<{ columns: { name: string; type: 
     const after = req.incremental ? (typeof req.incremental.after === 'number' ? String(req.incremental.after) : `'${String(req.incremental.after).replace(/'/g, "''")}'`) : '';
     const where = req.incremental ? `WHERE ${req.incremental.column} > ${after}` : '';
     const shape = await run(`SELECT * FROM ${quote(s, t)} LIMIT 0`);
-    const positions = shape.columns.map((c, i) => (/^(VARIANT|OBJECT|ARRAY|MAP|STRUCT|GEOGRAPHY|GEOMETRY|BINARY)/i.test(c.type) ? null : String(i + 1))).filter((x): x is string => !!x);
+    // Offset paging needs a total order over every column; rows that differ only in an unsortable column would tie.
+    const unsortable = shape.columns.filter((c) => /^(VARIANT|OBJECT|ARRAY|MAP|STRUCT|GEOGRAPHY|GEOMETRY|BINARY)/i.test(c.type)).map((c) => c.name);
+    if (unsortable.length) {
+      throw badRequest(`The column${unsortable.length > 1 ? 's' : ''} ${unsortable.join(', ')} cannot be sorted, so this table cannot be read in a stable order. Import a view without ${unsortable.length > 1 ? 'those columns' : 'that column'}.`);
+    }
+    const positions = shape.columns.map((_, i) => String(i + 1));
     if (!positions.length) throw badRequest('This table has no column that can be used to read it in a stable order.');
     const order = [...(req.incremental ? [req.incremental.column] : []), ...positions].join(', ');
     const r = await run(`SELECT * FROM ${quote(s, t)} ${where} ORDER BY ${order} LIMIT ${req.limit + 1} OFFSET ${req.offset}`);

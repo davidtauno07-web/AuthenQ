@@ -42,4 +42,35 @@ describe.runIf(process.env.CI || process.env.DEMO_PASSWORD)('source retention an
     await expect(twin.createSyntheticSet(ctx, source.id, { name: 'x' } as never)).rejects.toThrow();
     expect(await prisma.activityLog.count({ where: { resourceId: source.id, action: 'source.purged' } })).toBe(1);
   });
+
+  it('removes an upload that loses the race with a purge', async () => {
+    const { prisma } = await import('../src/lib/prisma.js');
+    const { storage } = await import('../src/lib/storage.js');
+    const fw = await import('../src/services/firewall.js');
+    const org = await prisma.organization.findUnique({ where: { slug: 'northwind-demo' } });
+    if (!org) return;
+    const admin = await prisma.user.findFirstOrThrow({ where: { email: 'admin@authenq.demo' } });
+    const ctx = { orgId: org.id, userId: admin.id, actorType: 'USER', actorLabel: 'test', roleKey: 'ADMIN', permissions: new Set<never>() } as never;
+    const source = await fw.createSource(ctx, { name: `race-test-${Date.now()}`, kind: 'UPLOAD' } as never);
+    const name = `race-${Date.now()}.csv`;
+    let upload: Promise<unknown> = Promise.resolve();
+    // Hold the purge's row lock and mark the source purged while the upload is in flight.
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT id FROM data_sources WHERE id = ${source.id}::uuid FOR UPDATE`;
+        await tx.dataSource.update({ where: { id: source.id }, data: { sourcePurgedAt: new Date() } });
+        upload = fw.uploadToSource(ctx, source.id, { originalname: name, buffer: Buffer.from('a\n1\n'), mimetype: 'text/csv' }).then(() => null, (e: unknown) => e);
+        await new Promise((r) => setTimeout(r, 1500));
+      },
+      { timeout: 20_000 },
+    );
+    expect(String(await upload)).toMatch(/deleted/);
+    const files = await prisma.file.findMany({ where: { orgId: org.id, name } });
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      expect(f.deletedAt).not.toBeNull();
+      if (f.storageKey) await expect(storage.get(f.storageKey)).rejects.toThrow();
+    }
+    expect(await prisma.processingJob.count({ where: { resourceId: source.id, type: 'FIREWALL_INGEST' } })).toBe(0);
+  });
 });

@@ -14,8 +14,8 @@ function incrementalColumn(req: PageRequest) {
 }
 
 /**
- * Offset paging needs a total order: the primary key when there is one, otherwise every orderable column,
- * so rows that tie on the order are identical in content and no row is skipped or read twice.
+ * Offset paging needs a total order: the primary key when there is one, otherwise every column.
+ * A keyless table with a column that cannot be sorted (JSON, XML, blobs) has no reliable order, so it is rejected.
  */
 async function orderBy(inc: string | null, pk: () => Promise<string[]>, cols: () => Promise<RemoteColumn[]>, unorderable: RegExp, q: (c: string) => string) {
   let keys: string[] = [];
@@ -24,7 +24,16 @@ async function orderBy(inc: string | null, pk: () => Promise<string[]>, cols: ()
   } catch {
     keys = [];
   }
-  if (!keys.length) keys = (await cols()).filter((c) => !unorderable.test(c.type)).map((c) => c.name);
+  if (!keys.length) {
+    const all = await cols();
+    const unsortable = all.filter((c) => unorderable.test(c.type)).map((c) => c.name);
+    if (unsortable.length) {
+      throw badRequest(
+        `This table has no primary key and its column${unsortable.length > 1 ? 's' : ''} ${unsortable.join(', ')} cannot be sorted, so it cannot be read in a stable order. Add a primary key, or import a view without ${unsortable.length > 1 ? 'those columns' : 'that column'}.`,
+      );
+    }
+    keys = all.map((c) => c.name);
+  }
   if (!keys.length) throw badRequest('This table has no column that can be used to read it in a stable order.');
   return [...(inc ? [inc] : []), ...keys.filter((k) => k !== inc)].map(q).join(', ');
 }
